@@ -4,6 +4,7 @@ import { store } from './store';
 import { ethers } from 'ethers';
 import fs from 'fs';
 import path from 'path';
+import { startMonitoring } from './monitor';
 
 // Initialize Bot
 const bot = new Bot(config.telegramBotToken);
@@ -331,6 +332,9 @@ async function startBot() {
     await bot.init();
     bot.start();
     console.log('✅ Bot running as @' + bot.botInfo.username);
+
+    // Start blockchain monitoring
+    startMonitoring(bot);
 }
 
 startBot().catch(console.error);
