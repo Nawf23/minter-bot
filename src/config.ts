@@ -8,22 +8,14 @@ export const config = {
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
     rpcUrl: process.env.RPC_URL || '',
     rpcUrlBase: process.env.RPC_URL_BASE || '',
-    privateKey: process.env.PRIVATE_KEY || '',
+    privateKey: process.env.PRIVATE_KEY || '', // Legacy, for migration only
+    encryptionKey: process.env.ENCRYPTION_KEY || '',
 };
 
-if (!config.telegramBotToken) {
-    console.error("❌ Missing TELEGRAM_BOT_TOKEN in .env");
+// Validation
+if (!config.telegramBotToken || !config.rpcUrl || !config.encryptionKey) {
+    console.error('❌ Missing required environment variables. Check .env file.');
     process.exit(1);
 }
 
-if (!config.rpcUrl) {
-    console.error("❌ Missing RPC_URL in .env");
-    process.exit(1);
-}
-
-if (!config.privateKey) {
-    console.error("❌ Missing PRIVATE_KEY in .env");
-    process.exit(1);
-}
-
-console.log("✅ Configuration loaded successfully.");
+console.log('✅ Configuration loaded successfully.');

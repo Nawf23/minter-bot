@@ -1,89 +1,168 @@
 import fs from 'fs';
 import path from 'path';
+import { encrypt, decrypt } from './crypto';
 
 const DB_PATH = path.resolve(__dirname, '../db.json');
 
-export interface BotData {
-    trackedWallets: string[];
-    botWalletAddress: string | null; // Derived from private key, just for display
-    isActive: boolean;
-    chatId: number | null;
+export interface TrackedWallet {
+    address: string;
+    name: string | null;
 }
 
-const defaultData: BotData = {
-    trackedWallets: [],
-    botWalletAddress: null,
-    isActive: true,
-    chatId: null
-};
+export interface UserData {
+    privateKey: string; // Encrypted
+    trackedWallets: TrackedWallet[];
+    chatId: number;
+}
 
-export class Store {
-    private data: BotData;
+export interface BotData {
+    users: {
+        [userId: string]: UserData;
+    };
+}
+
+class Store {
+    private data: BotData = { users: {} };
 
     constructor() {
-        this.data = this.load();
-        // Migration check: if old format exists (trackedWallet string), migrate to array
-        const anyData = this.data as any;
-        if (anyData.trackedWallet && !this.data.trackedWallets) {
-            this.data.trackedWallets = [anyData.trackedWallet];
-            delete anyData.trackedWallet;
-            this.save(this.data);
-        }
-        // Ensure array exists
-        if (!this.data.trackedWallets) {
-            this.data.trackedWallets = [];
-        }
+        this.load();
     }
 
-    private load(): BotData {
-        if (!fs.existsSync(DB_PATH)) {
-            this.save(defaultData);
-            return defaultData;
-        }
+    private load() {
         try {
-            const raw = fs.readFileSync(DB_PATH, 'utf-8');
-            return JSON.parse(raw);
-        } catch (error) {
-            console.error("Error reading db.json, resetting to default:", error);
-            return defaultData;
+            if (fs.existsSync(DB_PATH)) {
+                const raw = fs.readFileSync(DB_PATH, 'utf-8');
+                const parsed = JSON.parse(raw);
+
+                // Check if old format (needs migration)
+                if (parsed.trackedWallets && !parsed.users) {
+                    console.log('🔄 Detected old data format. Migration needed.');
+                    // Don't auto-migrate, let bot.ts handle it with proper user ID
+                    this.data = { users: {} };
+                } else {
+                    this.data = parsed;
+                }
+            }
+        } catch (err) {
+            console.error('Error loading database:', err);
+            this.data = { users: {} };
         }
     }
 
-    private save(data: BotData) {
-        fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+    private save() {
+        try {
+            fs.writeFileSync(DB_PATH, JSON.stringify(this.data, null, 2));
+        } catch (err) {
+            console.error('Error saving database:', err);
+        }
     }
 
+    // Get entire data (for checking migration)
     get(): BotData {
         return this.data;
     }
 
-    getTrackedWallets(): string[] {
-        return this.data.trackedWallets || [];
+    // User Management
+    getUser(userId: string): UserData | null {
+        return this.data.users[userId] || null;
     }
 
-    addTrackedWallet(address: string) {
-        if (!this.data.trackedWallets) this.data.trackedWallets = [];
-        // Prevent duplicates
-        if (!this.data.trackedWallets.find(w => w.toLowerCase() === address.toLowerCase())) {
-            this.data.trackedWallets.push(address);
-            this.save(this.data);
+    userExists(userId: string): boolean {
+        return !!this.data.users[userId];
+    }
+
+    addUser(userId: string, chatId: number, privateKey: string) {
+        const encryptedKey = encrypt(privateKey);
+        this.data.users[userId] = {
+            privateKey: encryptedKey,
+            trackedWallets: [],
+            chatId,
+        };
+        this.save();
+    }
+
+    changePrivateKey(userId: string, newPrivateKey: string) {
+        if (!this.data.users[userId]) {
+            throw new Error('User not found');
+        }
+        this.data.users[userId].privateKey = encrypt(newPrivateKey);
+        this.save();
+    }
+
+    getDecryptedPrivateKey(userId: string): string | null {
+        const user = this.data.users[userId];
+        if (!user) return null;
+        try {
+            return decrypt(user.privateKey);
+        } catch {
+            return null;
         }
     }
 
-    removeTrackedWallet(address: string) {
-        if (!this.data.trackedWallets) return;
-        this.data.trackedWallets = this.data.trackedWallets.filter(a => a.toLowerCase() !== address.toLowerCase());
-        this.save(this.data);
+    // Wallet Management
+    addTrackedWallet(userId: string, address: string, name: string | null = null) {
+        if (!this.data.users[userId]) {
+            throw new Error('User not found');
+        }
+
+        const wallets = this.data.users[userId].trackedWallets;
+
+        // Check if already tracking
+        if (wallets.some(w => w.address.toLowerCase() === address.toLowerCase())) {
+            throw new Error('Already tracking this wallet');
+        }
+
+        // Max 3 wallets
+        if (wallets.length >= 3) {
+            throw new Error('Maximum 3 wallets allowed');
+        }
+
+        wallets.push({ address, name });
+        this.save();
     }
 
-    setChatId(id: number) {
-        this.data.chatId = id;
-        this.save(this.data);
+    removeTrackedWallet(userId: string, address: string) {
+        if (!this.data.users[userId]) {
+            throw new Error('User not found');
+        }
+
+        const wallets = this.data.users[userId].trackedWallets;
+        const index = wallets.findIndex(w => w.address.toLowerCase() === address.toLowerCase());
+
+        if (index === -1) {
+            throw new Error('Wallet not found');
+        }
+
+        wallets.splice(index, 1);
+        this.save();
     }
 
-    setBotWalletAddress(address: string) {
-        this.data.botWalletAddress = address;
-        this.save(this.data);
+    getTrackedWallets(userId: string): TrackedWallet[] {
+        return this.data.users[userId]?.trackedWallets || [];
+    }
+
+    deleteUser(userId: string) {
+        delete this.data.users[userId];
+        this.save();
+    }
+
+    getAllUsers(): Array<{ userId: string; data: UserData }> {
+        return Object.entries(this.data.users).map(([userId, data]) => ({
+            userId,
+            data,
+        }));
+    }
+
+    // Migration from old format
+    migrateToMultiUser(userId: string, chatId: number, oldPrivateKey: string, oldWallets: string[]) {
+        const encryptedKey = encrypt(oldPrivateKey);
+        this.data.users[userId] = {
+            privateKey: encryptedKey,
+            trackedWallets: oldWallets.map(addr => ({ address: addr, name: null })),
+            chatId,
+        };
+        this.save();
+        console.log(`✅ Migrated data to user ${userId}`);
     }
 }
 

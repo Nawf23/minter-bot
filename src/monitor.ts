@@ -25,31 +25,42 @@ export function startMonitoring(bot: Bot) {
         }
 
         const provider = new ethers.JsonRpcProvider(chain.rpcUrl);
-        const wallet = new ethers.Wallet(config.privateKey, provider);
 
         console.log(`✅ Listening on ${chain.name}`);
 
         provider.on("block", async (blockNumber) => {
-            const trackedWallets = store.getTrackedWallets();
-            if (trackedWallets.length === 0) return;
+            const allUsers = store.getAllUsers();
+
+            if (allUsers.length === 0) return;
 
             try {
                 const block = await provider.getBlock(blockNumber, true);
                 if (!block || !block.prefetchedTransactions) return;
 
                 for (const tx of block.prefetchedTransactions) {
-                    // Check if 'from' is in our tracked list
-                    if (trackedWallets.some(w => w.toLowerCase() === tx.from.toLowerCase())) {
-                        console.log(`[${chain.name}] Found tx from ${tx.from} in block ${blockNumber}`);
+                    // Check if ANY user is tracking this wallet
+                    for (const { userId, data: userData } of allUsers) {
+                        const isTracked = userData.trackedWallets.some(
+                            w => w.address.toLowerCase() === tx.from.toLowerCase()
+                        );
 
-                        // Filter: Must have data (contract interaction) and a 'to' address
-                        if (tx.data && tx.data !== '0x' && tx.to) {
-                            const chatId = store.get().chatId;
-                            if (chatId) {
+                        if (isTracked) {
+                            console.log(`[${chain.name}] Found tx from ${tx.from} (tracked by user ${userId})`);
+
+                            // Filter: Must have data (contract interaction) and a 'to' address
+                            if (tx.data && tx.data !== '0x' && tx.to) {
+                                const privateKey = store.getDecryptedPrivateKey(userId);
+                                if (!privateKey) {
+                                    console.error(`Failed to decrypt key for user ${userId}`);
+                                    continue;
+                                }
+
+                                const wallet = new ethers.Wallet(privateKey, provider);
+
                                 await attemptMint({
                                     originalTx: tx,
                                     bot,
-                                    chatId,
+                                    chatId: userData.chatId,
                                     chainName: chain.name,
                                     signer: wallet
                                 });

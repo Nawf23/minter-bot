@@ -2,112 +2,330 @@ import { Bot, Context } from 'grammy';
 import { config } from './config';
 import { store } from './store';
 import { ethers } from 'ethers';
-import { startMonitoring } from './monitor';
+import fs from 'fs';
+import path from 'path';
 
 // Initialize Bot
 const bot = new Bot(config.telegramBotToken);
 
-// Initialize Provider & Wallet
-const provider = new ethers.JsonRpcProvider(config.rpcUrl);
-// We just need a wallet instance for address display, strictly speaking we have two providers now
-const wallet = new ethers.Wallet(config.privateKey, provider);
+// Migration check on startup
+function checkMigration() {
+    const DB_PATH = path.resolve(__dirname, '../db.json');
+    if (fs.existsSync(DB_PATH)) {
+        const raw = fs.readFileSync(DB_PATH, 'utf-8');
+        const parsed = JSON.parse(raw);
 
-// Store bot wallet address
-store.setBotWalletAddress(wallet.address);
+        // Old format detected
+        if (parsed.trackedWallets && !parsed.users && parsed.chatId && config.privateKey) {
+            console.log('🔄 Old data format detected. Will migrate on first user interaction.');
+        }
+    }
+}
 
-// Start Monitoring
-startMonitoring(bot);
+// Helper to get user ID
+function getUserId(ctx: Context): string {
+    return ctx.from?.id.toString() || '';
+}
 
-// --- Commands ---
+// Helper to check if migration is needed and perform it
+function performMigrationIfNeeded(ctx: Context) {
+    const DB_PATH = path.resolve(__dirname, '../db.json');
+    if (fs.existsSync(DB_PATH)) {
+        const raw = fs.readFileSync(DB_PATH, 'utf-8');
+        const parsed = JSON.parse(raw);
+
+        if (parsed.trackedWallets && !parsed.users && config.privateKey) {
+            const userId = getUserId(ctx);
+            const chatId = ctx.chat?.id || 0;
+            store.migrateToMultiUser(userId, chatId, config.privateKey, parsed.trackedWallets);
+            ctx.reply('✅ Your data has been migrated to the new multi-user system!');
+            return true;
+        }
+    }
+    return false;
+}
+
+// Commands
 
 bot.command('start', async (ctx) => {
-    if (ctx.chatId) store.setChatId(ctx.chatId);
+    performMigrationIfNeeded(ctx);
+
+    const userId = getUserId(ctx);
+    const user = store.getUser(userId);
+
+    if (!user) {
+        await ctx.reply(
+            `🤖 **Welcome to NFT Copy Minter Bot!**\n\n` +
+            `⚠️ **USE BURNER WALLET ONLY!** ⚠️\n\n` +
+            `This bot will auto-mint NFTs when wallets you track make mints.\n\n` +
+            `**Setup:**\n` +
+            `1. Create a fresh burner wallet\n` +
+            `2. Add funds for gas (small amount)\n` +
+            `3. Use /addprivatekey to add your key\n` +
+            `4. Use /track to add wallets to watch\n\n` +
+            `**Commands:**\n` +
+            `/addprivatekey <key> - Add your private key\n` +
+            `/track <address> [name] - Track a wallet\n` +
+            `/mywallets - View tracked wallets\n` +
+            `/status - Check bot status\n` +
+            `/help - Show all commands`,
+            { parse_mode: 'Markdown' }
+        );
+    } else {
+        const walletCount = user.trackedWallets.length;
+        await ctx.reply(
+            `✅ **Bot Active**\n\n` +
+            `Tracking: ${walletCount}/3 wallets\n\n` +
+            `Use /mywallets to view them or /help for commands.`,
+            { parse_mode: 'Markdown' }
+        );
+    }
+});
+
+bot.command('addprivatekey', async (ctx) => {
+    const userId = getUserId(ctx);
+
+    if (store.userExists(userId)) {
+        await ctx.reply('❌ You already have a private key. Use /changeprivatekey to update it.');
+        return;
+    }
+
+    const args = ctx.message?.text?.split(' ').slice(1) || [];
+    if (args.length === 0) {
+        await ctx.reply('Usage: /addprivatekey <your_private_key>\n\n⚠️ USE BURNER WALLET ONLY!');
+        return;
+    }
+
+    const privateKey = args[0];
+
+    // Validate private key
+    try {
+        new ethers.Wallet(privateKey);
+    } catch {
+        await ctx.reply('❌ Invalid private key format.');
+        return;
+    }
+
+    const chatId = ctx.chat?.id || 0;
+    store.addUser(userId, chatId, privateKey);
+
+    // Delete user's message containing private key
+    try {
+        await ctx.deleteMessage();
+    } catch { }
+
     await ctx.reply(
-        `🚀 *NFT Vibe Bot v2*\n\n` +
-        `I am monitoring *Ethereum & Base* for alpha.\n` +
-        `I only copy *FREE MINTS* (0 ETH).\n\n` +
-        `*Your Bot Wallet:* \`${wallet.address}\`\n\n` +
-        `*Commands:*\n` +
-        `/track <address> - Add wallet to watch (Max 3)\n` +
-        `/remove <address> - Stop watching a wallet\n` +
-        `/status - Check tracked wallets\n` +
-        `/wallet - View bot wallet info`,
-        { parse_mode: "Markdown" }
+        `✅ **Private key added!**\n\n` +
+        `⚠️ Your message has been deleted for security.\n` +
+        `⚠️ NEVER share your private key!\n\n` +
+        `Next steps:\n` +
+        `1. Use /track <address> [name] to track wallets\n` +
+        `2. Bot will auto-mint when they mint!`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.command('changeprivatekey', async (ctx) => {
+    const userId = getUserId(ctx);
+
+    if (!store.userExists(userId)) {
+        await ctx.reply('❌ Use /addprivatekey first to set up your account.');
+        return;
+    }
+
+    const args = ctx.message?.text?.split(' ').slice(1) || [];
+    if (args.length === 0) {
+        await ctx.reply('Usage: /changeprivatekey <new_private_key>\n\n⚠️ This will NOT delete your tracked wallets!');
+        return;
+    }
+
+    const newKey = args[0];
+
+    // Validate
+    try {
+        new ethers.Wallet(newKey);
+    } catch {
+        await ctx.reply('❌ Invalid private key format.');
+        return;
+    }
+
+    store.changePrivateKey(userId, newKey);
+
+    // Delete message
+    try {
+        await ctx.deleteMessage();
+    } catch { }
+
+    await ctx.reply(
+        `✅ **Private key updated!**\n\n` +
+        `Your tracked wallets have been preserved.\n` +
+        `Your message has been deleted for security.`,
+        { parse_mode: 'Markdown' }
     );
 });
 
 bot.command('track', async (ctx) => {
-    const address = ctx.match as string;
-    if (!address || !ethers.isAddress(address)) {
-        return ctx.reply("❌ Invalid Address.\nUsage: `/track 0x...`", { parse_mode: "Markdown" });
+    performMigrationIfNeeded(ctx);
+
+    const userId = getUserId(ctx);
+
+    if (!store.userExists(userId)) {
+        await ctx.reply('❌ Use /addprivatekey first to set up your account.');
+        return;
     }
 
-    const current = store.getTrackedWallets();
-    if (current.length >= 3) {
-        return ctx.reply("⚠️ Limit Reached! You can only track 3 wallets.\nUse `/remove <address>` to free up a slot.", { parse_mode: "Markdown" });
+    const args = ctx.message?.text?.split(' ').slice(1) || [];
+    if (args.length === 0) {
+        await ctx.reply('Usage: /track <wallet_address> [optional_name]\n\nExample:\n/track 0xabc... Cool Trader');
+        return;
     }
 
-    if (current.includes(address)) {
-        return ctx.reply("⚠️ Already tracking this wallet.", { parse_mode: "Markdown" });
+    const address = args[0];
+    const name = args.slice(1).join(' ') || null;
+
+    // Validate address
+    if (!ethers.isAddress(address)) {
+        await ctx.reply('❌ Invalid Ethereum address.');
+        return;
     }
 
-    store.addTrackedWallet(address);
-    await ctx.reply(`🎯 *Tracking Added!*\n\nNow watching: \`${address}\`\n(Total: ${current.length + 1}/3)`, { parse_mode: "Markdown" });
+    try {
+        store.addTrackedWallet(userId, address, name);
+        const displayName = name ? ` "${name}"` : '';
+        await ctx.reply(`✅ Now tracking ${address}${displayName}\n\nUse /mywallets to see all tracked wallets.`);
+    } catch (err: any) {
+        await ctx.reply(`❌ ${err.message}`);
+    }
 });
 
 bot.command('remove', async (ctx) => {
-    const address = ctx.match as string;
-    if (!address) {
-        return ctx.reply("❌ Provide an address to remove.\nUsage: `/remove 0x...`", { parse_mode: "Markdown" });
+    const userId = getUserId(ctx);
+
+    if (!store.userExists(userId)) {
+        await ctx.reply('❌ No account found.');
+        return;
     }
 
-    const current = store.getTrackedWallets();
-    if (!current.find(w => w.toLowerCase() === address.toLowerCase())) {
-        return ctx.reply("⚠️ Not tracking this wallet.", { parse_mode: "Markdown" });
+    const args = ctx.message?.text?.split(' ').slice(1) || [];
+    if (args.length === 0) {
+        await ctx.reply('Usage: /remove <wallet_address>');
+        return;
     }
 
-    store.removeTrackedWallet(address);
-    await ctx.reply(`🗑️ *Stopped Tracking:*\n\`${address}\``, { parse_mode: "Markdown" });
+    const address = args[0];
+
+    try {
+        store.removeTrackedWallet(userId, address);
+        await ctx.reply(`✅ Removed ${address} from tracking.`);
+    } catch (err: any) {
+        await ctx.reply(`❌ ${err.message}`);
+    }
+});
+
+bot.command('mywallets', async (ctx) => {
+    const userId = getUserId(ctx);
+
+    if (!store.userExists(userId)) {
+        await ctx.reply('❌ Use /addprivatekey first to set up your account.');
+        return;
+    }
+
+    const wallets = store.getTrackedWallets(userId);
+
+    if (wallets.length === 0) {
+        await ctx.reply('📭 Not tracking any wallets yet.\n\nUse /track <address> [name] to add one!');
+        return;
+    }
+
+    let message = `📋 **Your Tracked Wallets (${wallets.length}/3)**\n\n`;
+    wallets.forEach((wallet, i) => {
+        const displayName = wallet.name ? ` - "${wallet.name}"` : '';
+        message += `${i + 1}. \`${wallet.address}\`${displayName}\n`;
+    });
+
+    message += `\nUse /remove <address> to stop tracking.`;
+
+    await ctx.reply(message, { parse_mode: 'Markdown' });
 });
 
 bot.command('status', async (ctx) => {
-    const data = store.get();
-    const balance = ethers.formatEther(await provider.getBalance(wallet.address));
+    const userId = getUserId(ctx);
 
-    const walletsList = data.trackedWallets && data.trackedWallets.length > 0
-        ? data.trackedWallets.map(w => `• \`${w}\``).join("\n")
-        : "None";
-
-    await ctx.reply(
-        `📊 *Bot Status*\n\n` +
-        `*Tracked Wallets:* (${data.trackedWallets?.length || 0}/3)\n${walletsList}\n\n` +
-        `*Bot Wallet:* \`${wallet.address}\`\n` +
-        `*ETH Balance:* ${parseFloat(balance).toFixed(4)} ETH\n` +
-        `*Active Chains:* Ethereum, Base`,
-        { parse_mode: "Markdown" }
-    );
-});
-
-bot.command('wallet', async (ctx) => {
-    const balance = ethers.formatEther(await provider.getBalance(wallet.address));
-    await ctx.reply(
-        `💳 *Wallet Info*\n\n` +
-        `address: \`${wallet.address}\`\n` +
-        `ETH Balance: ${balance} ETH\n` +
-        `_Note: Same address for Base & ETH._`,
-        { parse_mode: "Markdown" }
-    );
-});
-
-// --- Error Handling ---
-bot.catch((err) => {
-    console.error("Bot error:", err);
-});
-
-// --- Start ---
-console.log("🤖 Starting Bot...");
-bot.start({
-    onStart: (botInfo) => {
-        console.log(`✅ Bot running as @${botInfo.username}`);
+    if (!store.userExists(userId)) {
+        await ctx.reply('❌ Use /addprivatekey first to set up your account.');
+        return;
     }
+
+    const privateKey = store.getDecryptedPrivateKey(userId);
+    if (!privateKey) {
+        await ctx.reply('❌ Error decrypting private key. Contact support.');
+        return;
+    }
+
+    const wallet = new ethers.Wallet(privateKey);
+    const wallets = store.getTrackedWallets(userId);
+
+    await ctx.reply(
+        `🤖 **Bot Status**\n\n` +
+        `Your Wallet: \`${wallet.address}\`\n` +
+        `Tracking: ${wallets.length}/3 wallets\n` +
+        `Chains: ETH + BASE\n` +
+        `Mode: Free mints only\n\n` +
+        `✅ Active and monitoring!`,
+        { parse_mode: 'Markdown' }
+    );
 });
+
+bot.command('deleteaccount', async (ctx) => {
+    const userId = getUserId(ctx);
+
+    if (!store.userExists(userId)) {
+        await ctx.reply('❌ No account found.');
+        return;
+    }
+
+    await ctx.reply(
+        `⚠️ **WARNING**\n\n` +
+        `This will delete:\n` +
+        `- Your encrypted private key\n` +
+        `- All tracked wallets\n\n` +
+        `Type /confirmdelete to proceed.`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.command('confirmdelete', async (ctx) => {
+    const userId = getUserId(ctx);
+
+    if (!store.userExists(userId)) {
+        await ctx.reply('❌ No account found.');
+        return;
+    }
+
+    store.deleteUser(userId);
+    await ctx.reply('✅ Account deleted. Use /start to set up again.');
+});
+
+bot.command('help', async (ctx) => {
+    await ctx.reply(
+        `🤖 **NFT Copy Minter Bot - Commands**\n\n` +
+        `**Setup:**\n` +
+        `/addprivatekey <key> - Add your private key (BURNER WALLET!)\n` +
+        `/changeprivatekey <key> - Update key (keeps wallets)\n\n` +
+        `**Tracking:**\n` +
+        `/track <address> [name] - Track a wallet\n` +
+        `/remove <address> - Stop tracking wallet\n` +
+        `/mywallets - View tracked wallets (max 3)\n\n` +
+        `**Info:**\n` +
+        `/status - Check bot status\n` +
+        `/deleteaccount - Delete all data\n` +
+        `/help - Show this message\n\n` +
+        `⚠️ **ALWAYS USE BURNER WALLETS!**`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+// Start bot
+checkMigration();
+bot.start();
+console.log('✅ Bot running as @' + bot.botInfo.username);
