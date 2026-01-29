@@ -326,6 +326,11 @@ bot.command('help', async (ctx) => {
 });
 
 // Start bot
-checkMigration();
-bot.start();
-console.log('✅ Bot running as @' + bot.botInfo.username);
+async function startBot() {
+    checkMigration();
+    await bot.init();
+    bot.start();
+    console.log('✅ Bot running as @' + bot.botInfo.username);
+}
+
+startBot().catch(console.error);
