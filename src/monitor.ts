@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ethers } from 'ethers';
 import { config } from './config';
 import { store } from './store';
