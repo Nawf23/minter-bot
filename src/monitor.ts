@@ -56,7 +56,7 @@ export function startMonitoring(bot: Bot) {
                         }
                     }
                 }
-            } catch (err) {
+            } catch (err: any) {
                 // Console error is noisy on public RPCs sometimes, keep it clean
                 console.error(`[${chain.name}] Error processing block ${blockNumber}:`, err.message);
             }
