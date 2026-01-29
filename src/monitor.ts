@@ -1,4 +1,4 @@
-// @ts-nocheck
+// @ts-nocheck force update
 import { ethers } from 'ethers';
 import { config } from './config';
 import { store } from './store';
