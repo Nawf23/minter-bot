@@ -2,7 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import { encrypt, decrypt } from './crypto';
 
-const DB_PATH = path.resolve(__dirname, '../db.json');
+const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../data');
+const DB_PATH = path.join(DATA_DIR, 'db.json');
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    console.log(`📁 Created data directory: ${DATA_DIR}`);
+}
 
 export interface TrackedWallet {
     address: string;
