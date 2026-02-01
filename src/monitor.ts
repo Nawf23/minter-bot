@@ -4,6 +4,7 @@ import { config } from './config';
 import { store } from './store';
 import { attemptMint } from './mint';
 import { Bot } from 'grammy';
+import { isLikelyNFTMint, getFilterReason } from './filters';
 
 interface ChainConfig {
     name: string;
@@ -49,21 +50,29 @@ export function startMonitoring(bot: Bot) {
 
                             // Filter: Must have data (contract interaction) and a 'to' address
                             if (tx.data && tx.data !== '0x' && tx.to) {
-                                const privateKey = store.getDecryptedPrivateKey(userId);
-                                if (!privateKey) {
-                                    console.error(`Failed to decrypt key for user ${userId}`);
-                                    continue;
+                                // Smart filtering: Check if this is actually an NFT mint
+                                if (isLikelyNFTMint(tx.data)) {
+                                    console.log(`  ✅ NFT Mint detected! Attempting to copy...`);
+
+                                    const privateKey = store.getDecryptedPrivateKey(userId);
+                                    if (!privateKey) {
+                                        console.error(`Failed to decrypt key for user ${userId}`);
+                                        continue;
+                                    }
+
+                                    const wallet = new ethers.Wallet(privateKey, provider);
+
+                                    await attemptMint({
+                                        originalTx: tx,
+                                        bot,
+                                        chatId: userData.chatId,
+                                        chainName: chain.name,
+                                        signer: wallet
+                                    });
+                                } else {
+                                    const reason = getFilterReason(tx.data);
+                                    console.log(`  ⏭️ Skipped: ${reason}`);
                                 }
-
-                                const wallet = new ethers.Wallet(privateKey, provider);
-
-                                await attemptMint({
-                                    originalTx: tx,
-                                    bot,
-                                    chatId: userData.chatId,
-                                    chainName: chain.name,
-                                    signer: wallet
-                                });
                             }
                         }
                     }
