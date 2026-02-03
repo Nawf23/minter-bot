@@ -29,8 +29,9 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
         }
 
         await bot.api.sendMessage(chatId,
-            `🚨 *detected transaction on ${chainName}!*\n\n` +
+            `🚨 *Detected transaction on ${chainName}!*\n\n` +
             `Target: \`${originalTx.to}\`\n` +
+            `From (tracked wallet): \`${originalTx.from}\`\n` +
             `Appears to be FREE! 🤑\n` +
             `Attempting copy...`,
             { parse_mode: "Markdown" }
@@ -43,11 +44,19 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
             value: 0n, // Enforce 0 value since we checked it's free, but original was 0 anyway
         };
 
-        console.log(`[${chainName}] Creating transaction to ${originalTx.to}...`);
+        console.log(`[${chainName}] ========== MINT ATTEMPT ==========`);
+        console.log(`[${chainName}] Bot wallet: ${signer.address}`);
+        console.log(`[${chainName}] Target contract: ${originalTx.to}`);
+        console.log(`[${chainName}] Original tx hash: ${originalTx.hash}`);
+        console.log(`[${chainName}] Tracked wallet: ${originalTx.from}`);
+        console.log(`[${chainName}] Sending transaction...`);
 
         const tx = await signer.sendTransaction(txRequest);
 
-        console.log(`[${chainName}] Sent! Hash: ${tx.hash}`);
+        console.log(`[${chainName}] ✅ Transaction sent successfully!`);
+        console.log(`[${chainName}] NEW transaction hash: ${tx.hash}`);
+        console.log(`[${chainName}] From: ${tx.from}`);
+        console.log(`[${chainName}] =====================================`);
 
         const explorerUrl = chainName === 'BASE'
             ? `https://basescan.org/tx/${tx.hash}`
@@ -55,12 +64,34 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
 
         await bot.api.sendMessage(chatId,
             `🚀 *Mint Transaction Sent!* (${chainName})\n\n` +
+            `Your wallet: \`${signer.address}\`\n` +
             `Hash: [View on Explorer](${explorerUrl})`,
             { parse_mode: "Markdown" }
         );
 
     } catch (error: any) {
-        console.error(`[${chainName}] Mint failed:`, error);
-        await bot.api.sendMessage(chatId, `❌ *Mint Failed* (${chainName})\n\nReason: ${error.message.substring(0, 100)}...`, { parse_mode: "Markdown" });
+        console.error(`[${chainName}] ❌ Mint failed:`, error);
+        console.error(`[${chainName}] Error message:`, error.message);
+        console.error(`[${chainName}] Error code:`, error.code);
+
+        let reason = error.message.substring(0, 200);
+
+        // Detect specific errors
+        if (error.message.includes('Invalid signature') || error.message.includes('signature')) {
+            reason = '⚠️ This mint requires a wallet-specific signature/whitelist proof';
+        } else if (error.message.includes('not eligible') || error.message.includes('not allowed')) {
+            reason = '⚠️ Wallet not eligible for this mint';
+        } else if (error.message.includes('insufficient funds')) {
+            reason = '⚠️ Insufficient ETH for gas fees';
+        } else if (error.message.includes('exceeds allowance') || error.message.includes('max supply')) {
+            reason = '⚠️ Mint sold out or max mints reached';
+        }
+
+        await bot.api.sendMessage(chatId,
+            `❌ *Mint Failed* (${chainName})\n\n` +
+            `Reason: ${reason}\n\n` +
+            `_Your wallet: \`${signer.address}\`_`,
+            { parse_mode: "Markdown" }
+        );
     }
 }
