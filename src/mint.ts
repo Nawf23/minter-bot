@@ -1,6 +1,7 @@
 import { ethers, TransactionResponse, JsonRpcProvider } from 'ethers';
 import { config } from './config';
 import { Bot } from 'grammy';
+import { replaceRecipientInCalldata, needsAddressReplacement } from './calldata_utils';
 
 interface ReplayOptions {
     originalTx: TransactionResponse;
@@ -37,11 +38,24 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
             { parse_mode: "Markdown" }
         );
 
-        // --- 2. Construct Transaction ---
+        // --- 2. Construct Transaction with Address Replacement ---
+        let calldata = originalTx.data;
+
+        // Replace recipient address if needed
+        if (needsAddressReplacement(calldata)) {
+            console.log(`[${chainName}] ⚙️ Replacing recipient address in calldata...`);
+            calldata = replaceRecipientInCalldata(calldata, signer.address);
+            console.log(`[${chainName}] ✅ Calldata modified - NFT will go to bot wallet`);
+        } else {
+            console.log(`[${chainName}] ℹ️ No address replacement needed`);
+        }
+
+
+        // --- 3. Send Transaction ---
         const txRequest = {
             to: originalTx.to,
-            data: originalTx.data, // Copy calldata exactly
-            value: 0n, // Enforce 0 value since we checked it's free, but original was 0 anyway
+            data: calldata,  // Use modified calldata (with replaced address if needed)
+            value: 0n,
         };
 
         console.log(`[${chainName}] ========== MINT ATTEMPT ==========`);
