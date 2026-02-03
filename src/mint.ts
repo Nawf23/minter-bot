@@ -90,15 +90,26 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
 
         let reason = error.message.substring(0, 200);
 
-        // Detect specific errors
-        if (error.message.includes('Invalid signature') || error.message.includes('signature')) {
-            reason = '⚠️ This mint requires a wallet-specific signature/whitelist proof';
-        } else if (error.message.includes('not eligible') || error.message.includes('not allowed')) {
+        // Detect specific errors with clear user-facing messages
+        if (error.message.includes('Invalid signature') ||
+            error.message.includes('signature') ||
+            error.message.includes('not whitelisted') ||
+            error.message.includes('allowlist')) {
+            reason = '🚫 This mint requires a whitelist';
+        } else if (error.message.includes('not eligible') ||
+            error.message.includes('not allowed') ||
+            error.message.includes('unauthorized')) {
             reason = '⚠️ Wallet not eligible for this mint';
-        } else if (error.message.includes('insufficient funds')) {
+        } else if (error.message.includes('insufficient funds') ||
+            error.message.includes('insufficient balance')) {
             reason = '⚠️ Insufficient ETH for gas fees';
-        } else if (error.message.includes('exceeds allowance') || error.message.includes('max supply')) {
+        } else if (error.message.includes('exceeds allowance') ||
+            error.message.includes('max supply') ||
+            error.message.includes('sold out') ||
+            error.message.includes('limit reached')) {
             reason = '⚠️ Mint sold out or max mints reached';
+        } else if (error.message.includes('paused')) {
+            reason = '⚠️ Minting is currently paused';
         }
 
         await bot.api.sendMessage(chatId,
