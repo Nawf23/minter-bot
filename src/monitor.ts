@@ -16,8 +16,15 @@ const chains: ChainConfig[] = [
     { name: 'BASE', rpcUrl: config.rpcUrlBase }
 ];
 
+// Track last checked block for each chain to avoid re-checking
+const lastCheckedBlock: Record<string, number> = {};
+
+/**
+ * MEMORY-EFFICIENT monitoring:
+ * Instead of fetching full blocks, we poll for specific wallet activity
+ */
 export function startMonitoring(bot: Bot) {
-    console.log("👀 Starting Blockchain Monitors...");
+    console.log("👀 Starting Blockchain Monitors (Memory-Optimized)...");
 
     chains.forEach(chain => {
         if (!chain.rpcUrl) {
@@ -26,61 +33,97 @@ export function startMonitoring(bot: Bot) {
         }
 
         const provider = new ethers.JsonRpcProvider(chain.rpcUrl);
-
         console.log(`✅ Listening on ${chain.name}`);
 
-        provider.on("block", async (blockNumber) => {
-            const allUsers = store.getAllUsers();
-
-            if (allUsers.length === 0) return;
-
+        // Poll every 15 seconds instead of every block to reduce load
+        setInterval(async () => {
             try {
-                const block = await provider.getBlock(blockNumber, true);
-                if (!block || !block.prefetchedTransactions) return;
+                const allUsers = store.getAllUsers();
+                if (allUsers.length === 0) return;
 
-                for (const tx of block.prefetchedTransactions) {
-                    // Check if ANY user is tracking this wallet
-                    for (const { userId, data: userData } of allUsers) {
-                        const isTracked = userData.trackedWallets.some(
-                            w => w.address.toLowerCase() === tx.from.toLowerCase()
-                        );
+                const currentBlock = await provider.getBlockNumber();
+                const lastBlock = lastCheckedBlock[chain.name] || currentBlock - 1;
 
-                        if (isTracked) {
-                            console.log(`[${chain.name}] Found tx from ${tx.from} (tracked by user ${userId})`);
+                // Skip if we've already checked this block
+                if (currentBlock <= lastBlock) return;
 
-                            // Filter: Must have data (contract interaction) and a 'to' address
-                            if (tx.data && tx.data !== '0x' && tx.to) {
-                                // Smart filtering: Check if this is actually an NFT mint
-                                if (isLikelyNFTMint(tx.data)) {
-                                    console.log(`  ✅ NFT Mint detected! Attempting to copy...`);
+                // Only check last 1 block to avoid memory issues
+                const blockToCheck = currentBlock;
 
-                                    const privateKey = store.getDecryptedPrivateKey(userId);
-                                    if (!privateKey) {
-                                        console.error(`Failed to decrypt key for user ${userId}`);
-                                        continue;
+                console.log(`[${chain.name}] Checking block ${blockToCheck}...`);
+
+                // Check each tracked wallet individually (memory efficient)
+                for (const { userId, data: userData } of allUsers) {
+                    for (const wallet of userData.trackedWallets) {
+                        try {
+                            // Get transaction count to see if wallet sent anything
+                            const txCount = await provider.getTransactionCount(
+                                wallet.address,
+                                blockToCheck
+                            );
+
+                            // Check previous block tx count
+                            const prevTxCount = await provider.getTransactionCount(
+                                wallet.address,
+                                blockToCheck - 1
+                            );
+
+                            // If count increased, wallet sent a transaction
+                            if (txCount > prevTxCount) {
+                                console.log(`[${chain.name}] Activity detected from ${wallet.address}`);
+
+                                // Fetch only the block header (no transactions) to get tx hashes
+                                const block = await provider.getBlock(blockToCheck, false);
+                                if (!block || !block.transactions) continue;
+
+                                // Check each transaction hash
+                                for (const txHash of block.transactions) {
+                                    const tx = await provider.getTransaction(txHash);
+                                    if (!tx) continue;
+
+                                    // Check if this tx is from our tracked wallet
+                                    if (tx.from.toLowerCase() === wallet.address.toLowerCase()) {
+                                        console.log(`[${chain.name}] Found tx from tracked wallet`);
+
+                                        // Apply filters
+                                        if (tx.data && tx.data !== '0x' && tx.to) {
+                                            if (isLikelyNFTMint(tx.data)) {
+                                                console.log(`  ✅ NFT Mint detected!`);
+
+                                                const privateKey = store.getDecryptedPrivateKey(userId);
+                                                if (!privateKey) {
+                                                    console.error(`Failed to decrypt key for user ${userId}`);
+                                                    continue;
+                                                }
+
+                                                const walletSigner = new ethers.Wallet(privateKey, provider);
+
+                                                await attemptMint({
+                                                    originalTx: tx,
+                                                    bot,
+                                                    chatId: userData.chatId,
+                                                    chainName: chain.name,
+                                                    signer: walletSigner
+                                                });
+                                            } else {
+                                                const reason = getFilterReason(tx.data);
+                                                console.log(`  ⏭️ Skipped: ${reason}`);
+                                            }
+                                        }
                                     }
-
-                                    const wallet = new ethers.Wallet(privateKey, provider);
-
-                                    await attemptMint({
-                                        originalTx: tx,
-                                        bot,
-                                        chatId: userData.chatId,
-                                        chainName: chain.name,
-                                        signer: wallet
-                                    });
-                                } else {
-                                    const reason = getFilterReason(tx.data);
-                                    console.log(`  ⏭️ Skipped: ${reason}`);
                                 }
                             }
+                        } catch (err: any) {
+                            console.error(`[${chain.name}] Error checking wallet ${wallet.address}:`, err.message);
                         }
                     }
                 }
+
+                lastCheckedBlock[chain.name] = blockToCheck;
+
             } catch (err: any) {
-                // Console error is noisy on public RPCs sometimes, keep it clean
-                console.error(`[${chain.name}] Error processing block ${blockNumber}`);
+                console.error(`[${chain.name}] Error in monitoring loop:`, err.message);
             }
-        });
+        }, 15000); // Check every 15 seconds
     });
 }
