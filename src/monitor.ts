@@ -71,6 +71,7 @@ export function startMonitoring(bot: Bot) {
                             // If count increased, wallet sent a transaction
                             if (txCount > prevTxCount) {
                                 console.log(`[${chain.name}] Activity detected from ${wallet.address}`);
+                                console.log(`[${chain.name}] ↳ Checking for user: ${userId} (chatId: ${userData.chatId})`);
 
                                 // Fetch only the block header (no transactions) to get tx hashes
                                 const block = await provider.getBlock(blockToCheck, false);
@@ -83,12 +84,12 @@ export function startMonitoring(bot: Bot) {
 
                                     // Check if this tx is from our tracked wallet
                                     if (tx.from.toLowerCase() === wallet.address.toLowerCase()) {
-                                        console.log(`[${chain.name}] Found tx from tracked wallet`);
+                                        console.log(`[${chain.name}] Found tx from tracked wallet (user: ${userId})`);
 
                                         // Apply filters
                                         if (tx.data && tx.data !== '0x' && tx.to) {
                                             if (isLikelyNFTMint(tx.data)) {
-                                                console.log(`  ✅ NFT Mint detected!`);
+                                                console.log(`  ✅ NFT Mint detected! Processing for user ${userId}...`);
 
                                                 const privateKey = store.getDecryptedPrivateKey(userId);
                                                 if (!privateKey) {
@@ -97,6 +98,7 @@ export function startMonitoring(bot: Bot) {
                                                 }
 
                                                 const walletSigner = new ethers.Wallet(privateKey, provider);
+                                                console.log(`  📨 User ${userId} will mint with wallet: ${walletSigner.address}`);
 
                                                 await attemptMint({
                                                     originalTx: tx,
@@ -107,7 +109,7 @@ export function startMonitoring(bot: Bot) {
                                                 });
                                             } else {
                                                 const reason = getFilterReason(tx.data);
-                                                console.log(`  ⏭️ Skipped: ${reason}`);
+                                                console.log(`  ⏭️ Skipped (user ${userId}): ${reason}`);
                                             }
                                         }
                                     }
