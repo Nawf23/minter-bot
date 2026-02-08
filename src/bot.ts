@@ -327,14 +327,20 @@ bot.command('help', async (ctx) => {
 });
 
 // Admin broadcast command - sends sample success message to all users
+// Set ADMIN_USER_ID environment variable to your Telegram user ID
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID || '';
 
 bot.command('broadcast', async (ctx) => {
     const userId = getUserId(ctx);
 
-    // Only allow admin to broadcast
-    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-        await ctx.reply('❌ Only the admin can use this command.');
+    // Security: Only allow if ADMIN_USER_ID is set AND matches sender
+    if (!ADMIN_USER_ID) {
+        await ctx.reply('❌ Broadcast disabled. Set ADMIN_USER_ID in environment variables.');
+        return;
+    }
+
+    if (userId !== ADMIN_USER_ID) {
+        await ctx.reply('❌ Only the bot admin can use this command.');
         return;
     }
 
@@ -354,7 +360,7 @@ bot.command('broadcast', async (ctx) => {
     let successCount = 0;
     let failCount = 0;
 
-    for (const { userId, data: userData } of allUsers) {
+    for (const { userId: uid, data: userData } of allUsers) {
         try {
             await bot.api.sendMessage(
                 userData.chatId,
@@ -363,7 +369,7 @@ bot.command('broadcast', async (ctx) => {
             );
             successCount++;
         } catch (err: any) {
-            console.error(`Failed to broadcast to user ${userId}:`, err.message);
+            console.error(`Failed to broadcast to user ${uid}:`, err.message);
             failCount++;
         }
     }
