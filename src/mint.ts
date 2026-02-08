@@ -81,8 +81,9 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
             await bot.api.sendMessage(chatId,
                 `🚀 *Mint Transaction Sent!* (${chainName})\n\n` +
                 `Your wallet: \`${signer.address}\`\n` +
-                `Hash: [View on Explorer](${explorerUrl})`,
-                { parse_mode: "Markdown" }
+                `Hash: [View on Explorer](${explorerUrl})\n\n` +
+                `_If you enjoy my services, give my creator a follow on X_ 👉 [@victornawf](https://x.com/victornawf2)`,
+                { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
             );
             console.log(`[${chainName}] ✅ Telegram notification sent to chatId: ${chatId}`);
         } catch (telegramError: any) {

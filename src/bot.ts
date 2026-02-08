@@ -326,6 +326,51 @@ bot.command('help', async (ctx) => {
     );
 });
 
+// Admin broadcast command - sends sample success message to all users
+const ADMIN_USER_ID = process.env.ADMIN_USER_ID || '';
+
+bot.command('broadcast', async (ctx) => {
+    const userId = getUserId(ctx);
+
+    // Only allow admin to broadcast
+    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+        await ctx.reply('❌ Only the admin can use this command.');
+        return;
+    }
+
+    const allUsers = store.getAllUsers();
+
+    if (allUsers.length === 0) {
+        await ctx.reply('❌ No users to broadcast to.');
+        return;
+    }
+
+    const sampleMessage =
+        `🚀 *Sample Mint Notification*\n\n` +
+        `Your wallet: \`0xYour...Wallet\`\n` +
+        `Hash: [View on Explorer](https://etherscan.io/)\n\n` +
+        `_If you enjoy my services, give my creator a follow on X_ 👉 [@victornawf](https://x.com/victornawf2)`;
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const { userId, data: userData } of allUsers) {
+        try {
+            await bot.api.sendMessage(
+                userData.chatId,
+                sampleMessage,
+                { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
+            );
+            successCount++;
+        } catch (err: any) {
+            console.error(`Failed to broadcast to user ${userId}:`, err.message);
+            failCount++;
+        }
+    }
+
+    await ctx.reply(`✅ Broadcast complete!\n\nSent: ${successCount}\nFailed: ${failCount}`);
+});
+
 // Start bot
 async function startBot() {
     checkMigration();
