@@ -76,12 +76,19 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
             ? `https://basescan.org/tx/${tx.hash}`
             : `https://etherscan.io/tx/${tx.hash}`;
 
-        await bot.api.sendMessage(chatId,
-            `🚀 *Mint Transaction Sent!* (${chainName})\n\n` +
-            `Your wallet: \`${signer.address}\`\n` +
-            `Hash: [View on Explorer](${explorerUrl})`,
-            { parse_mode: "Markdown" }
-        );
+        // Send success notification (wrapped to prevent silent failures)
+        try {
+            await bot.api.sendMessage(chatId,
+                `🚀 *Mint Transaction Sent!* (${chainName})\n\n` +
+                `Your wallet: \`${signer.address}\`\n` +
+                `Hash: [View on Explorer](${explorerUrl})`,
+                { parse_mode: "Markdown" }
+            );
+            console.log(`[${chainName}] ✅ Telegram notification sent to chatId: ${chatId}`);
+        } catch (telegramError: any) {
+            console.error(`[${chainName}] ⚠️ Failed to send Telegram notification:`, telegramError.message);
+            console.error(`[${chainName}] ChatId was: ${chatId}`);
+        }
 
     } catch (error: any) {
         console.error(`[${chainName}] ❌ Mint failed:`, error);
