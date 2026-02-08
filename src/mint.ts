@@ -95,35 +95,63 @@ export async function attemptMint({ originalTx, bot, chatId, chainName, signer }
         console.error(`[${chainName}] Error message:`, error.message);
         console.error(`[${chainName}] Error code:`, error.code);
 
-        let reason = error.message.substring(0, 200);
+        const errorMsg = error.message.toLowerCase();
+        let reason = error.message.substring(0, 150);
 
         // Detect specific errors with clear user-facing messages
-        if (error.message.includes('Invalid signature') ||
-            error.message.includes('signature') ||
-            error.message.includes('not whitelisted') ||
-            error.message.includes('allowlist')) {
+        if (errorMsg.includes('invalid signature') ||
+            errorMsg.includes('bad signature') ||
+            errorMsg.includes('not whitelisted') ||
+            errorMsg.includes('allowlist') ||
+            errorMsg.includes('merkle')) {
             reason = '🚫 This mint requires a whitelist';
-        } else if (error.message.includes('not eligible') ||
-            error.message.includes('not allowed') ||
-            error.message.includes('unauthorized')) {
+        } else if (errorMsg.includes('not eligible') ||
+            errorMsg.includes('not allowed') ||
+            errorMsg.includes('unauthorized') ||
+            errorMsg.includes('not authorized')) {
             reason = '⚠️ Wallet not eligible for this mint';
-        } else if (error.message.includes('insufficient funds') ||
-            error.message.includes('insufficient balance')) {
-            reason = '⚠️ Insufficient ETH for gas fees';
-        } else if (error.message.includes('exceeds allowance') ||
-            error.message.includes('max supply') ||
-            error.message.includes('sold out') ||
-            error.message.includes('limit reached')) {
-            reason = '⚠️ Mint sold out or max mints reached';
-        } else if (error.message.includes('paused')) {
-            reason = '⚠️ Minting is currently paused';
+        } else if (errorMsg.includes('insufficient funds') ||
+            errorMsg.includes('insufficient balance') ||
+            errorMsg.includes('not enough')) {
+            reason = '💰 Insufficient ETH for gas fees';
+        } else if (errorMsg.includes('exceeds allowance') ||
+            errorMsg.includes('max supply') ||
+            errorMsg.includes('sold out') ||
+            errorMsg.includes('limit reached') ||
+            errorMsg.includes('max mint') ||
+            errorMsg.includes('already minted') ||
+            errorMsg.includes('exceeds max')) {
+            reason = '🚫 Mint sold out or you already minted';
+        } else if (errorMsg.includes('paused') ||
+            errorMsg.includes('not active') ||
+            errorMsg.includes('not started') ||
+            errorMsg.includes('not open')) {
+            reason = '⏸️ Minting is currently paused';
+        } else if (errorMsg.includes('ended') ||
+            errorMsg.includes('expired') ||
+            errorMsg.includes('closed') ||
+            errorMsg.includes('finished')) {
+            reason = '⏰ Mint has ended';
+        } else if (errorMsg.includes('gas') ||
+            errorMsg.includes('underpriced') ||
+            errorMsg.includes('replacement fee')) {
+            reason = '⛽ Gas price too low - network is congested';
+        } else if (errorMsg.includes('nonce')) {
+            reason = '🔄 Transaction conflict - try again';
+        } else if (errorMsg.includes('revert') && errorMsg.length < 50) {
+            reason = '❌ Contract rejected the transaction';
         }
 
-        await bot.api.sendMessage(chatId,
-            `❌ *Mint Failed* (${chainName})\n\n` +
-            `Reason: ${reason}\n\n` +
-            `_Your wallet: \`${signer.address}\`_`,
-            { parse_mode: "Markdown" }
-        );
+        // Wrap in try-catch to prevent notification failures from crashing
+        try {
+            await bot.api.sendMessage(chatId,
+                `❌ *Mint Failed* (${chainName})\n\n` +
+                `Reason: ${reason}\n\n` +
+                `_Your wallet: \`${signer.address}\`_`,
+                { parse_mode: "Markdown" }
+            );
+        } catch (telegramError: any) {
+            console.error(`[${chainName}] ⚠️ Failed to send error notification:`, telegramError.message);
+        }
     }
 }
