@@ -1,0 +1,23 @@
+{
+  "name": "telegram-nft-copy-minter",
+  "version": "1.0.1",
+  "description": "A vibe coding bot to auto-copy mints on Ethereum",
+  "main": "dist/bot.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --max-old-space-size=512 dist/bot.js",
+    "dev": "nodemon --watch 'src/**/*.ts' --exec 'ts-node' src/bot.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.1",
+    "ethers": "^6.11.1",
+    "grammy": "^1.21.1",
+    "lowdb": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.19",
+    "nodemon": "^3.0.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
