@@ -209,19 +209,8 @@ export async function attemptMintAllKeys({
         return keys.map(k => ({ success: false, keyName: k.name, address: k.address, error: `Paid (${cost} ETH)` }));
     }
 
-    // Notify: mint detected
-    try {
-        await bot.api.sendMessage(chatId,
-            `🚨 *Mint detected on ${chainName}!*\n\n` +
-            `Target: \`${originalTx.to}\`\n` +
-            `From: \`${originalTx.from}\`\n` +
-            `FREE mint! 🤑 Firing ${keys.length} key(s)...`,
-            { parse_mode: "Markdown" }
-        );
-    } catch { }
-
-    // Fire all keys in parallel
-    const results = await Promise.allSettled(
+    // 1. Fire all keys in parallel IMMEDIATELY (Highest Priority)
+    const mintPromise = Promise.allSettled(
         keys.map(async (key) => {
             const provider = getSharedProvider(rpcUrl);
             const signer = new ethers.Wallet(key.privateKey, provider);
@@ -236,6 +225,18 @@ export async function attemptMintAllKeys({
             });
         })
     );
+
+    // 2. Notify: mint detected (Asynchronously, don't await)
+    bot.api.sendMessage(chatId,
+        `🚨 *Mint detected on ${chainName}!*\n\n` +
+        `Target: \`${originalTx.to}\`\n` +
+        `From: \`${originalTx.from}\`\n` +
+        `FREE mint! 🤑 Firing ${keys.length} key(s)...`,
+        { parse_mode: "Markdown" }
+    ).catch(() => { });
+
+    // 3. Wait for transactions to finish sending
+    const results = await mintPromise;
 
     const mintResults: MintResult[] = results.map((r, i) =>
         r.status === 'fulfilled' ? r.value : {
