@@ -147,38 +147,6 @@ function cleanupProcessedTxs() {
     }
 }
 
-// ─── Admin Social Feed ───
-
-async function notifyAdminFeed(
-    bot: Bot,
-    chainName: string,
-    trackedAddress: string,
-    contractAddress: string,
-    txHash: string,
-    trackerCount: number
-) {
-    if (!ADMIN_CHAT_ID) return;
-
-    const walletName = getTrackedWalletName(trackedAddress);
-    const label = walletName ? `"${walletName}"` : trackedAddress.substring(0, 12) + '...';
-
-    try {
-        const explorerBase = chainName === 'BASE' ? 'basescan.org' :
-            chainName === 'ARB' ? 'arbiscan.io' :
-                chainName === 'OP' ? 'optimistic.etherscan.io' :
-                    chainName === 'POLY' ? 'polygonscan.com' : 'etherscan.io';
-
-        await bot.api.sendMessage(parseInt(ADMIN_CHAT_ID),
-            `📡 *Alpha Feed* (${chainName})\n\n` +
-            `Wallet ${label} minted!\n` +
-            `Contract: \`${contractAddress}\`\n` +
-            `[View TX](https://${explorerBase}/tx/${txHash})\n` +
-            `Tracked by: ${trackerCount} user(s)`,
-            { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
-        );
-    } catch { }
-}
-
 /** Look up a friendly name for a tracked address across all users */
 function getTrackedWalletName(address: string): string | null {
     const allUsers = store.getAllUsers();
@@ -258,7 +226,7 @@ async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
         processedTxs.add(txKey);
 
         // Admin social feed notification
-        notifyAdminFeed(bot, chain.name, fromAddr, tx.to, tx.hash, trackers.length);
+        // Admin feed removed
 
         // Separate admin from others
         const adminTracker = ADMIN_CHAT_ID

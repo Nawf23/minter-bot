@@ -648,7 +648,7 @@ bot.command('help', async (ctx) => {
         `/mywallets - View tracked wallets\n\n` +
         `**Stats & Settings:**\n` +
         `/stats - View your mint statistics\n` +
-        `/autolist <n> <on|off> - Auto-list mints on OpenSea\n\n` +
+        `/autolist - Auto-list mints on OpenSea\n\n` +
         `**Info:**\n` +
         `/status - Check bot status\n` +
         `/deleteaccount - Delete all data\n` +
