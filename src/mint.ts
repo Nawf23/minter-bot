@@ -8,6 +8,7 @@ import {
     genericReplaceAddress,
     calldataContainsAddress
 } from './calldata_utils';
+import { getSharedProvider } from './rpc_utils';
 
 // ─── Types ───
 
@@ -222,7 +223,7 @@ export async function attemptMintAllKeys({
     // Fire all keys in parallel
     const results = await Promise.allSettled(
         keys.map(async (key) => {
-            const provider = new ethers.JsonRpcProvider(rpcUrl);
+            const provider = getSharedProvider(rpcUrl);
             const signer = new ethers.Wallet(key.privateKey, provider);
             return attemptSingleMint({
                 originalTx,

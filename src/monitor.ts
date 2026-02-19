@@ -5,6 +5,7 @@ import { store } from './store';
 import { attemptMintAllKeys } from './mint';
 import { Bot } from 'grammy';
 import { isLikelyNFTMint, getFilterReason } from './filters';
+import { getSharedProvider } from './rpc_utils';
 
 // ─── Chain Configuration ───
 
@@ -48,16 +49,6 @@ const chains: ChainConfig[] = [
         pollInterval: 3000,
     },
     {
-        name: 'OP',
-        rpcUrls: [
-            config.rpcUrlOp,
-            'https://optimism-rpc.publicnode.com',
-            'https://rpc.ankr.com/optimism',
-        ].filter(Boolean),
-        wsUrl: config.wsUrlOp,
-        pollInterval: 4000,
-    },
-    {
         name: 'POLY',
         rpcUrls: [
             config.rpcUrlPoly,
@@ -79,46 +70,21 @@ const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '6588909371';
 const BATCH_SIZE = 20;
 const BATCH_DELAY_MS = 50;
 
-// Track active WebSocket connections for reconnection
-const activeWsConnections: Record<string, ethers.WebSocketProvider | null> = {};
+// ─── Provider Pooling ───
 
-// ─── RPC Helpers ───
+const wsProviderPool: Record<string, ethers.WebSocketProvider | null> = {};
 
-async function rpcCallWithRetry<T>(
-    rpcUrls: string[],
-    action: (provider: ethers.JsonRpcProvider) => Promise<T>,
-    chainName: string,
-    maxRetries = 3
-): Promise<T> {
-    let lastError: any;
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        const rpcUrl = rpcUrls[attempt % rpcUrls.length];
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
-        try {
-            return await action(provider);
-        } catch (err: any) {
-            lastError = err;
-            const isRetryable = err.message?.includes('ECONNRESET') ||
-                err.message?.includes('ETIMEDOUT') ||
-                err.message?.includes('rate limit') ||
-                err.message?.includes('429');
-            if (isRetryable && attempt < maxRetries - 1) {
-                await sleep(Math.min(1000 * (attempt + 1), 3000));
-            } else {
-                throw err;
-            }
-        }
+// ─── Wallet Map Caching ───
+
+let cachedWalletMap: Map<string, Array<{ userId: string; chatId: number; username: string | null }>> | null = null;
+let lastKnownDataVersion = -1;
+
+function getWalletMap() {
+    if (cachedWalletMap && store.dataVersion === lastKnownDataVersion) {
+        return cachedWalletMap;
     }
-    throw lastError;
-}
 
-function sleep(ms: number) {
-    return new Promise(r => setTimeout(r, ms));
-}
-
-// ─── Wallet Map ───
-
-function buildWalletMap() {
+    console.log(`🧠 Rebuilding wallet map (version ${store.dataVersion})...`);
     const map = new Map<string, Array<{ userId: string; chatId: number; username: string | null }>>();
     const allUsers = store.getAllUsers();
 
@@ -133,7 +99,45 @@ function buildWalletMap() {
             });
         }
     }
+
+    cachedWalletMap = map;
+    lastKnownDataVersion = store.dataVersion;
     return map;
+}
+
+// ─── RPC Helpers ───
+
+async function rpcCallWithRetry<T>(
+    rpcUrls: string[],
+    action: (provider: ethers.JsonRpcProvider) => Promise<T>,
+    chainName: string,
+    maxRetries = 3
+): Promise<T> {
+    let lastError: any;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        const rpcUrl = rpcUrls[attempt % rpcUrls.length];
+        const provider = getSharedProvider(rpcUrl);
+        try {
+            return await action(provider);
+        } catch (err: any) {
+            lastError = err;
+            const isRetryable = err.message?.includes('ECONNRESET') ||
+                err.message?.includes('ETIMEDOUT') ||
+                err.message?.includes('rate limit') ||
+                err.message?.includes('429') ||
+                err.message?.includes('failed to detect network');
+            if (isRetryable && attempt < maxRetries - 1) {
+                await sleep(Math.min(1000 * (attempt + 1), 3000));
+            } else {
+                throw err;
+            }
+        }
+    }
+    throw lastError;
+}
+
+function sleep(ms: number) {
+    return new Promise(r => setTimeout(r, ms));
 }
 
 // ─── Cleanup ───
@@ -180,7 +184,7 @@ async function processMintBatches(
 // ─── Core Block Processing ───
 
 async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
-    const walletMap = buildWalletMap();
+    const walletMap = getWalletMap();
     if (walletMap.size === 0) return;
 
     let block;
@@ -216,17 +220,12 @@ async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
             continue;
         }
         if (!isLikelyNFTMint(tx.data)) {
-            const reason = getFilterReason(tx.data);
-            console.log(`  ⏭️ Filtered: ${reason}`);
             processedTxs.add(txKey);
             continue;
         }
 
         console.log(`  ✅ NFT Mint detected! ${trackers.length} user(s)`);
         processedTxs.add(txKey);
-
-        // Admin social feed notification
-        // Admin feed removed
 
         // Separate admin from others
         const adminTracker = ADMIN_CHAT_ID
@@ -298,12 +297,16 @@ function startWebSocketListener(chain: ChainConfig, bot: Bot) {
 
     console.log(`  ⚡ [${chain.name}] Starting WebSocket subscription: ${chain.wsUrl.substring(0, 45)}...`);
 
-    let wsProvider: ethers.WebSocketProvider;
+    let wsProvider: ethers.WebSocketProvider | null = null;
 
     const connect = () => {
         try {
+            if (wsProviderPool[chain.name]) {
+                wsProviderPool[chain.name]!.destroy();
+            }
+
             wsProvider = new ethers.WebSocketProvider(chain.wsUrl);
-            activeWsConnections[chain.name] = wsProvider;
+            wsProviderPool[chain.name] = wsProvider;
 
             wsProvider.on('block', async (blockNumber: number) => {
                 // Skip if we already processed this block via polling
@@ -330,14 +333,14 @@ function startWebSocketListener(chain: ChainConfig, bot: Bot) {
             if (ws) {
                 ws.on('close', () => {
                     console.log(`[${chain.name}] 🔌 WS disconnected, reconnecting in 5s...`);
-                    activeWsConnections[chain.name] = null;
+                    wsProviderPool[chain.name] = null;
                     setTimeout(connect, 5000);
                 });
             }
 
         } catch (err: any) {
             console.error(`[${chain.name}] ❌ WS connection failed: ${err.message}. Falling back to polling.`);
-            activeWsConnections[chain.name] = null;
+            wsProviderPool[chain.name] = null;
         }
     };
 
@@ -349,7 +352,7 @@ function startWebSocketListener(chain: ChainConfig, bot: Bot) {
 function startPollingListener(chain: ChainConfig, bot: Bot) {
     setInterval(async () => {
         try {
-            const walletMap = buildWalletMap();
+            const walletMap = getWalletMap();
             if (walletMap.size === 0) return;
 
             const currentBlock = await rpcCallWithRetry(
@@ -380,7 +383,7 @@ function startPollingListener(chain: ChainConfig, bot: Bot) {
 // ─── Entry Point ───
 
 export function startMonitoring(bot: Bot) {
-    console.log("👀 Starting Blockchain Monitors (v4 — Multi-Key + WebSocket + Multi-Chain)...");
+    console.log("👀 Starting Blockchain Monitors (v4.1 — Optimized)...");
 
     chains.forEach(chain => {
         if (chain.rpcUrls.length === 0) {

@@ -79,6 +79,7 @@ export function formatUserLog(userId: string, userData: UserData): string {
 
 class Store {
     private data: BotData = { users: {} };
+    public dataVersion: number = 0;
 
     constructor() {
         this.load();
@@ -157,6 +158,7 @@ class Store {
 
     private save() {
         try {
+            this.dataVersion++;
             fs.writeFileSync(DB_PATH, JSON.stringify(this.data, null, 2));
         } catch (err) {
             console.error('Error saving database:', err);
