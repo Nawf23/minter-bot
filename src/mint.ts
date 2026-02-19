@@ -1,158 +1,294 @@
-import { ethers, TransactionResponse, JsonRpcProvider } from 'ethers';
-import { config } from './config';
+import { ethers, TransactionResponse } from 'ethers';
 import { Bot } from 'grammy';
-import { replaceRecipientInCalldata, needsAddressReplacement } from './calldata_utils';
+import { store } from './store';
+import { config } from './config';
+import {
+    replaceRecipientInCalldata,
+    needsAddressReplacement,
+    genericReplaceAddress,
+    calldataContainsAddress
+} from './calldata_utils';
+
+// ─── Types ───
 
 interface ReplayOptions {
     originalTx: TransactionResponse;
     bot: Bot;
     chatId: number;
-    chainName: string; // 'ETH' or 'BASE'
-    signer: ethers.Wallet; // The wallet connected to the correct provider
+    chainName: string;
+    signer: ethers.Wallet;
+    keyName: string | null;
+    userId: string;
 }
 
-export async function attemptMint({ originalTx, bot, chatId, chainName, signer }: ReplayOptions) {
-    if (!originalTx.to) return;
+export interface MintResult {
+    success: boolean;
+    keyName: string | null;
+    address: string;
+    txHash?: string;
+    explorerUrl?: string;
+    error?: string;
+    autoList?: boolean;
+    skippedPrecheck?: boolean;
+}
+
+interface MultiMintOptions {
+    originalTx: TransactionResponse;
+    bot: Bot;
+    chatId: number;
+    chainName: string;
+    keys: Array<{ privateKey: string; name: string | null; address: string; autoList: boolean }>;
+    rpcUrl: string;
+    userLabel: string;
+    userId: string;
+}
+
+// ─── Explorer URLs per chain ───
+
+function getExplorerUrl(chainName: string, txHash: string): string {
+    switch (chainName) {
+        case 'BASE': return `https://basescan.org/tx/${txHash}`;
+        case 'ARB': return `https://arbiscan.io/tx/${txHash}`;
+        case 'OP': return `https://optimistic.etherscan.io/tx/${txHash}`;
+        case 'POLY': return `https://polygonscan.com/tx/${txHash}`;
+        default: return `https://etherscan.io/tx/${txHash}`;
+    }
+}
+
+// ─── Allowlist Pre-Check (estimateGas before sending) ───
+
+async function preCheckMint(
+    signer: ethers.Wallet,
+    txRequest: { to: string; data: string; value: bigint },
+    chainName: string,
+    keyName: string | null
+): Promise<{ pass: boolean; reason?: string }> {
+    try {
+        await signer.estimateGas(txRequest);
+        return { pass: true };
+    } catch (err: any) {
+        const msg = err.message?.toLowerCase() || '';
+        let reason = 'Pre-check failed';
+
+        if (msg.includes('not whitelisted') || msg.includes('allowlist') || msg.includes('merkle')) {
+            reason = 'Not on allowlist';
+        } else if (msg.includes('not eligible') || msg.includes('not allowed') || msg.includes('unauthorized')) {
+            reason = 'Not eligible';
+        } else if (msg.includes('already minted') || msg.includes('exceeds max') || msg.includes('sold out')) {
+            reason = 'Already minted or sold out';
+        } else if (msg.includes('paused') || msg.includes('not active')) {
+            reason = 'Minting paused';
+        } else if (msg.includes('ended') || msg.includes('expired')) {
+            reason = 'Mint ended';
+        } else if (msg.includes('insufficient funds')) {
+            reason = 'Insufficient gas funds';
+        } else if (msg.includes('unknown custom error') || msg.includes('execution reverted')) {
+            const dataMatch = err.message?.match(/data="(0x[a-fA-F0-9]+)"/);
+            reason = dataMatch ? `Contract rejected (${dataMatch[1]})` : 'Contract rejected';
+        }
+
+        console.log(`[${chainName}]   🛡️ [${keyName}] Pre-check FAILED: ${reason}`);
+        return { pass: false, reason };
+    }
+}
+
+// ─── Single Mint (returns result, no Telegram message) ───
+
+async function attemptSingleMint({
+    originalTx, chainName, signer, keyName, userId
+}: ReplayOptions): Promise<MintResult> {
+    if (!originalTx.to) {
+        return { success: false, keyName, address: signer.address, error: 'No target address' };
+    }
 
     try {
-        // --- 1. Free Mint Check ---
+        // Free Mint Check
         if (originalTx.value > 0n) {
-            console.log(`[${chainName}] Skipped paid mint: ${ethers.formatEther(originalTx.value)} ETH`);
-            await bot.api.sendMessage(chatId,
-                `⚠️ *Skipped Paid Mint*\n\n` +
-                `Target: \`${originalTx.to}\`\n` +
-                `Cost: ${ethers.formatEther(originalTx.value)} ETH\n` +
-                `Chain: ${chainName}\n\n` +
-                `_I only auto-mint free NFTs._`,
-                { parse_mode: "Markdown" }
-            );
-            return;
+            const cost = ethers.formatEther(originalTx.value);
+            return { success: false, keyName, address: signer.address, error: `Skipped paid mint (${cost} ETH)` };
         }
 
-        await bot.api.sendMessage(chatId,
-            `🚨 *Detected transaction on ${chainName}!*\n\n` +
-            `Target: \`${originalTx.to}\`\n` +
-            `From (tracked wallet): \`${originalTx.from}\`\n` +
-            `Appears to be FREE! 🤑\n` +
-            `Attempting copy...`,
-            { parse_mode: "Markdown" }
-        );
-
-        // --- 2. Construct Transaction with Address Replacement ---
+        // Construct calldata with address replacement
         let calldata = originalTx.data;
+        let addressReplaced = false;
 
-        // Replace recipient address if needed
         if (needsAddressReplacement(calldata)) {
-            console.log(`[${chainName}] ⚙️ Replacing recipient address in calldata...`);
             calldata = replaceRecipientInCalldata(calldata, signer.address);
-            console.log(`[${chainName}] ✅ Calldata modified - NFT will go to bot wallet`);
-        } else {
-            console.log(`[${chainName}] ℹ️ No address replacement needed`);
+            addressReplaced = true;
         }
 
+        if (!addressReplaced && calldataContainsAddress(calldata, originalTx.from)) {
+            const result = genericReplaceAddress(calldata, originalTx.from, signer.address);
+            calldata = result.data;
+            addressReplaced = true;
+            console.log(`[${chainName}]   ⚙️ [${keyName}] Generic replaced ${result.replacements} addr(s)`);
+        }
 
-        // --- 3. Send Transaction ---
         const txRequest = {
             to: originalTx.to,
-            data: calldata,  // Use modified calldata (with replaced address if needed)
+            data: calldata,
             value: 0n,
         };
 
-        console.log(`[${chainName}] ========== MINT ATTEMPT ==========`);
-        console.log(`[${chainName}] Bot wallet: ${signer.address}`);
-        console.log(`[${chainName}] Target contract: ${originalTx.to}`);
-        console.log(`[${chainName}] Original tx hash: ${originalTx.hash}`);
-        console.log(`[${chainName}] Tracked wallet: ${originalTx.from}`);
-        console.log(`[${chainName}] Sending transaction...`);
-
-        const tx = await signer.sendTransaction(txRequest);
-
-        console.log(`[${chainName}] ✅ Transaction sent successfully!`);
-        console.log(`[${chainName}] NEW transaction hash: ${tx.hash}`);
-        console.log(`[${chainName}] From: ${tx.from}`);
-        console.log(`[${chainName}] =====================================`);
-
-        const explorerUrl = chainName === 'BASE'
-            ? `https://basescan.org/tx/${tx.hash}`
-            : `https://etherscan.io/tx/${tx.hash}`;
-
-        // Send success notification (wrapped to prevent silent failures)
-        try {
-            await bot.api.sendMessage(chatId,
-                `🚀 *Mint Transaction Sent!* (${chainName})\n\n` +
-                `Your wallet: \`${signer.address}\`\n` +
-                `Hash: [View on Explorer](${explorerUrl})\n\n` +
-                `_If you enjoy my services, give my creator a follow on X_ 👉 [@victornawf](https://x.com/victornawf2)`,
-                { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
-            );
-            console.log(`[${chainName}] ✅ Telegram notification sent to chatId: ${chatId}`);
-        } catch (telegramError: any) {
-            console.error(`[${chainName}] ⚠️ Failed to send Telegram notification:`, telegramError.message);
-            console.error(`[${chainName}] ChatId was: ${chatId}`);
+        // ─── Allowlist Pre-Check ───
+        const preCheck = await preCheckMint(signer, txRequest, chainName, keyName);
+        if (!preCheck.pass) {
+            store.recordMintAttempt(userId, signer.address, false);
+            return {
+                success: false,
+                keyName,
+                address: signer.address,
+                error: preCheck.reason,
+                skippedPrecheck: true,
+            };
         }
+
+        // ─── Send Transaction (pre-check passed) ───
+        console.log(`[${chainName}]   📨 [${keyName}] Sending from ${signer.address}`);
+
+        // Send with manual gas limit (since we already estimated)
+        const tx = await signer.sendTransaction(txRequest);
+        console.log(`[${chainName}]   ✅ [${keyName}] TX sent: ${tx.hash}`);
+
+        const explorerUrl = getExplorerUrl(chainName, tx.hash);
+
+        // Record success
+        store.recordMintAttempt(userId, signer.address, true);
+
+        return {
+            success: true,
+            keyName,
+            address: signer.address,
+            txHash: tx.hash,
+            explorerUrl,
+        };
 
     } catch (error: any) {
-        console.error(`[${chainName}] ❌ Mint failed:`, error);
-        console.error(`[${chainName}] Error message:`, error.message);
-        console.error(`[${chainName}] Error code:`, error.code);
+        console.error(`[${chainName}]   ❌ [${keyName}] Failed: ${error.message?.substring(0, 100)}`);
 
-        const errorMsg = error.message.toLowerCase();
-        let reason = error.message.substring(0, 150);
+        store.recordMintAttempt(userId, signer.address, false);
 
-        // Detect specific errors with clear user-facing messages
-        if (errorMsg.includes('invalid signature') ||
-            errorMsg.includes('bad signature') ||
-            errorMsg.includes('not whitelisted') ||
-            errorMsg.includes('allowlist') ||
-            errorMsg.includes('merkle')) {
-            reason = '🚫 This mint requires a whitelist';
-        } else if (errorMsg.includes('not eligible') ||
-            errorMsg.includes('not allowed') ||
-            errorMsg.includes('unauthorized') ||
-            errorMsg.includes('not authorized')) {
-            reason = '⚠️ Wallet not eligible for this mint';
-        } else if (errorMsg.includes('insufficient funds') ||
-            errorMsg.includes('insufficient balance') ||
-            errorMsg.includes('not enough')) {
-            reason = '💰 Insufficient ETH for gas fees';
-        } else if (errorMsg.includes('exceeds allowance') ||
-            errorMsg.includes('max supply') ||
-            errorMsg.includes('sold out') ||
-            errorMsg.includes('limit reached') ||
-            errorMsg.includes('max mint') ||
-            errorMsg.includes('already minted') ||
-            errorMsg.includes('exceeds max')) {
-            reason = '🚫 Mint sold out or you already minted';
-        } else if (errorMsg.includes('paused') ||
-            errorMsg.includes('not active') ||
-            errorMsg.includes('not started') ||
-            errorMsg.includes('not open')) {
-            reason = '⏸️ Minting is currently paused';
-        } else if (errorMsg.includes('ended') ||
-            errorMsg.includes('expired') ||
-            errorMsg.includes('closed') ||
-            errorMsg.includes('finished')) {
-            reason = '⏰ Mint has ended';
-        } else if (errorMsg.includes('gas') ||
-            errorMsg.includes('underpriced') ||
-            errorMsg.includes('replacement fee')) {
-            reason = '⛽ Gas price too low - network is congested';
+        const errorMsg = error.message?.toLowerCase() || '';
+        let reason = error.message?.substring(0, 120) || 'Unknown error';
+
+        if (errorMsg.includes('insufficient funds') || errorMsg.includes('not enough')) {
+            reason = 'Insufficient ETH for gas';
         } else if (errorMsg.includes('nonce')) {
-            reason = '🔄 Transaction conflict - try again';
-        } else if (errorMsg.includes('revert') && errorMsg.length < 50) {
-            reason = '❌ Contract rejected the transaction';
+            reason = 'Nonce conflict';
+        } else if (errorMsg.includes('gas') || errorMsg.includes('underpriced')) {
+            reason = 'Gas too low';
+        } else if (errorMsg.includes('revert')) {
+            reason = 'Transaction reverted';
         }
 
-        // Wrap in try-catch to prevent notification failures from crashing
+        return { success: false, keyName, address: signer.address, error: reason };
+    }
+}
+
+// ─── Multi-Key Mint (fires all keys, sends ONE bundled notification) ───
+
+export async function attemptMintAllKeys({
+    originalTx, bot, chatId, chainName, keys, rpcUrl, userLabel, userId
+}: MultiMintOptions): Promise<MintResult[]> {
+    if (!originalTx.to) return [];
+
+    // Skip paid mints early
+    if (originalTx.value > 0n) {
+        const cost = ethers.formatEther(originalTx.value);
+        console.log(`[${chainName}] ⏭️ [${userLabel}] Skipped paid mint: ${cost} ETH`);
         try {
             await bot.api.sendMessage(chatId,
-                `❌ *Mint Failed* (${chainName})\n\n` +
-                `Reason: ${reason}\n\n` +
-                `_Your wallet: \`${signer.address}\`_`,
+                `⚠️ *Skipped Paid Mint*\n\n` +
+                `Target: \`${originalTx.to}\`\n` +
+                `Cost: ${cost} ETH | Chain: ${chainName}\n\n` +
+                `_I only auto-mint free NFTs._`,
                 { parse_mode: "Markdown" }
             );
-        } catch (telegramError: any) {
-            console.error(`[${chainName}] ⚠️ Failed to send error notification:`, telegramError.message);
+        } catch { }
+        return keys.map(k => ({ success: false, keyName: k.name, address: k.address, error: `Paid (${cost} ETH)` }));
+    }
+
+    // Notify: mint detected
+    try {
+        await bot.api.sendMessage(chatId,
+            `🚨 *Mint detected on ${chainName}!*\n\n` +
+            `Target: \`${originalTx.to}\`\n` +
+            `From: \`${originalTx.from}\`\n` +
+            `FREE mint! 🤑 Firing ${keys.length} key(s)...`,
+            { parse_mode: "Markdown" }
+        );
+    } catch { }
+
+    // Fire all keys in parallel
+    const results = await Promise.allSettled(
+        keys.map(async (key) => {
+            const provider = new ethers.JsonRpcProvider(rpcUrl);
+            const signer = new ethers.Wallet(key.privateKey, provider);
+            return attemptSingleMint({
+                originalTx,
+                bot,
+                chatId,
+                chainName,
+                signer,
+                keyName: key.name,
+                userId,
+            });
+        })
+    );
+
+    const mintResults: MintResult[] = results.map((r, i) =>
+        r.status === 'fulfilled' ? r.value : {
+            success: false,
+            keyName: keys[i]?.name || null,
+            address: keys[i]?.address || '???',
+            error: r.status === 'rejected' ? r.reason?.message : 'Unknown error',
+        }
+    );
+
+    // Build bundled notification
+    const successes = mintResults.filter(r => r.success);
+    const failures = mintResults.filter(r => !r.success);
+    const prechecked = mintResults.filter(r => r.skippedPrecheck);
+
+    let msg = '';
+
+    if (successes.length > 0) {
+        msg += `🚀 *Mint Results* (${chainName})\n\n`;
+        for (const r of successes) {
+            const label = r.keyName ? `"${r.keyName}"` : 'Key';
+            msg += `✅ ${label} (\`${r.address}\`)\n`;
+            msg += `   → [View on Explorer](${r.explorerUrl})\n\n`;
         }
     }
+
+    if (failures.length > 0) {
+        if (successes.length === 0) msg += `❌ *Mint Failed* (${chainName})\n\n`;
+        for (const r of failures) {
+            const label = r.keyName ? `"${r.keyName}"` : 'Key';
+            const icon = r.skippedPrecheck ? '🛡️' : '❌';
+            msg += `${icon} ${label} (\`${r.address}\`)\n`;
+            msg += `   → ${r.error}\n\n`;
+        }
+    }
+
+    if (prechecked.length > 0 && prechecked.length === mintResults.length) {
+        msg += `_🛡️ All keys failed pre-check — no gas was spent._\n\n`;
+    }
+
+    if (successes.length > 0) {
+        msg += `_Give my creator a follow on X_ 👉 [@victornawf](https://x.com/victornawf2)`;
+    }
+
+    if (msg) {
+        try {
+            await bot.api.sendMessage(chatId, msg, {
+                parse_mode: "Markdown",
+                link_preview_options: { is_disabled: true }
+            });
+        } catch (telegramError: any) {
+            console.error(`[${chainName}] ⚠️ [${userLabel}] Notification failed:`, telegramError.message);
+        }
+    }
+
+    return mintResults;
 }

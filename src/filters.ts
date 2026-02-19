@@ -24,6 +24,7 @@ const MINT_FUNCTION_WHITELIST = [
     '0x4e71d92d', // claim()
     '0x84bb1e42', // freeMint()
     '0x40c10f19', // mint(address,uint256) - common for ERC721
+    '0x161ac21f', // claim(address,address,address,uint256) - thirdweb/Zora claim
 ];
 
 /**

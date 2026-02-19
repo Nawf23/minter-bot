@@ -75,3 +75,51 @@ export function needsAddressReplacement(data: string): boolean {
 
     return addressMintFunctions.includes(functionSig);
 }
+
+/**
+ * GENERIC address replacement: scans ABI-encoded calldata for any occurrence
+ * of the original sender's address and replaces it with the new address.
+ * 
+ * This handles ANY function signature where the tracked wallet's address
+ * appears as a parameter (e.g. claim, mintTo, safeMint, thirdweb claims, etc.)
+ * 
+ * Addresses in ABI-encoded data are left-padded to 32 bytes, so we search
+ * for the zero-padded address pattern.
+ */
+export function genericReplaceAddress(
+    calldata: string,
+    originalAddress: string,
+    newAddress: string
+): { data: string; replacements: number } {
+    // Normalize addresses: lowercase, no 0x prefix, zero-padded to 64 chars
+    const originalPadded = originalAddress.toLowerCase().replace('0x', '').padStart(64, '0');
+    const newPadded = newAddress.toLowerCase().replace('0x', '').padStart(64, '0');
+
+    // Only search in the params section (after the 4-byte function selector)
+    const selector = calldata.substring(0, 10); // "0x" + 8 hex chars
+    let params = calldata.substring(10);
+
+    // Count and replace all occurrences
+    let replacements = 0;
+    while (params.toLowerCase().includes(originalPadded)) {
+        // Case-insensitive replacement (addresses can be mixed case)
+        const idx = params.toLowerCase().indexOf(originalPadded);
+        params = params.substring(0, idx) + newPadded + params.substring(idx + originalPadded.length);
+        replacements++;
+    }
+
+    return {
+        data: selector + params,
+        replacements
+    };
+}
+
+/**
+ * Check if calldata contains a specific address in its ABI-encoded parameters.
+ * Used to determine if generic replacement is needed.
+ */
+export function calldataContainsAddress(data: string, address: string): boolean {
+    const paddedAddress = address.toLowerCase().replace('0x', '').padStart(64, '0');
+    const params = data.substring(10).toLowerCase();
+    return params.includes(paddedAddress);
+}
