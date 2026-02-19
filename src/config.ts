@@ -31,9 +31,14 @@ export const config = {
     openSeaApiKey: process.env.OPENSEA_API_KEY || '',
 };
 
-// Validation — only ETH + encryption are strictly required
-if (!config.telegramBotToken || !config.rpcUrl || !config.encryptionKey) {
-    console.error('❌ Missing required environment variables. Check .env file.');
+// Validation
+const missing: string[] = [];
+if (!config.telegramBotToken) missing.push('TELEGRAM_BOT_TOKEN');
+if (!config.rpcUrl) missing.push('RPC_URL');
+if (!config.encryptionKey) missing.push('ENCRYPTION_KEY');
+
+if (missing.length > 0) {
+    console.error(`❌ Missing required environment variables: ${missing.join(', ')}`);
     process.exit(1);
 }
 
