@@ -156,9 +156,11 @@ class Store {
         }
     }
 
-    private save() {
+    private save(structuralChange: boolean = false) {
         try {
-            this.dataVersion++;
+            if (structuralChange) {
+                this.dataVersion++;
+            }
             fs.writeFileSync(DB_PATH, JSON.stringify(this.data, null, 2));
         } catch (err) {
             console.error('Error saving database:', err);
@@ -204,12 +206,12 @@ class Store {
             username: null,
             stats: {},
         };
-        this.save();
+        this.save(true);
     }
 
     deleteUser(userId: string) {
         delete this.data.users[userId];
-        this.save();
+        this.save(true);
     }
 
     getAllUsers(): Array<{ userId: string; data: UserData }> {
@@ -331,7 +333,7 @@ class Store {
             throw new Error(`Invalid key number. You have ${user.walletKeys.length} key(s)`);
         }
         user.walletKeys[keyIndex - 1].autoList = enabled;
-        this.save();
+        this.save(true);
     }
 
     // ─── Stats ───
@@ -358,7 +360,7 @@ class Store {
             stats.mintsFailed++;
         }
         stats.lastMintAt = new Date().toISOString();
-        this.save();
+        this.save(false);
     }
 
     getStats(userId: string): { keys: Array<{ name: string | null; address: string; stats: KeyStats }>; totals: KeyStats } {
@@ -410,7 +412,7 @@ class Store {
         }
 
         wallets.push({ address, name });
-        this.save();
+        this.save(true);
     }
 
     removeTrackedWallet(userId: string, address: string) {
@@ -426,7 +428,7 @@ class Store {
         }
 
         wallets.splice(index, 1);
-        this.save();
+        this.save(true);
     }
 
     getTrackedWallets(userId: string): TrackedWallet[] {

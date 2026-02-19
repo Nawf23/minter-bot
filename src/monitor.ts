@@ -66,7 +66,7 @@ const lastCheckedBlock: Record<string, number> = {};
 const processedTxs = new Set<string>();
 const MAX_PROCESSED_TXS = 5000;
 
-const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '6588909371';
+const ADMIN_ID = process.env.ADMIN_USER_ID || process.env.ADMIN_CHAT_ID || '6588909371';
 const BATCH_SIZE = 20;
 const BATCH_DELAY_MS = 50;
 
@@ -228,11 +228,11 @@ async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
         processedTxs.add(txKey);
 
         // Separate admin from others
-        const adminTracker = ADMIN_CHAT_ID
-            ? trackers.find(t => t.chatId.toString() === ADMIN_CHAT_ID)
+        const adminTracker = ADMIN_ID
+            ? trackers.find(t => t.chatId.toString() === ADMIN_ID || t.userId === ADMIN_ID)
             : null;
-        const otherTrackers = ADMIN_CHAT_ID
-            ? trackers.filter(t => t.chatId.toString() !== ADMIN_CHAT_ID)
+        const otherTrackers = ADMIN_ID
+            ? trackers.filter(t => t.chatId.toString() !== ADMIN_ID && t.userId !== ADMIN_ID)
             : trackers;
 
         // ADMIN PRIORITY: fire admin's keys first
