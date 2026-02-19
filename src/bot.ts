@@ -471,8 +471,7 @@ bot.command('status', async (ctx) => {
     let keyList = '';
     keys.forEach((key, i) => {
         const label = key.name ? ` "${key.name}"` : '';
-        const autoListIcon = key.autoList ? ' 🏷️' : '';
-        keyList += `  ${i + 1}. \`${key.address}\`${label}${autoListIcon}\n`;
+        keyList += `  ${i + 1}. \`${key.address}\`${label}\n`;
     });
 
     // Detect active chains
@@ -536,68 +535,7 @@ bot.command('stats', async (ctx) => {
     await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
-// ─── Auto-List ───
 
-bot.command('autolist', async (ctx) => {
-    touchUser(ctx);
-    const userId = getUserId(ctx);
-
-    if (!store.userExists(userId)) {
-        await ctx.reply('❌ Use /addkey first to set up your account.');
-        return;
-    }
-
-    const args = ctx.message?.text?.split(' ').slice(1) || [];
-    if (args.length < 2) {
-        const keys = store.getWalletKeys(userId);
-        let msg = `🏷️ **Auto-List Settings**\n\n`;
-        msg += `Usage: /autolist <key_number> <on|off>\n\n`;
-        msg += `**Your Keys:**\n`;
-        keys.forEach((key, i) => {
-            const status = key.autoList ? '✅ ON' : '❌ OFF';
-            const label = key.name || `Key ${i + 1}`;
-            msg += `  ${i + 1}. "${label}" - ${status}\n`;
-        });
-        msg += `\n_When enabled, successfully minted NFTs will be auto-listed on OpenSea._`;
-        await ctx.reply(msg, { parse_mode: 'Markdown' });
-        return;
-    }
-
-    const keyNum = parseInt(args[0]);
-    const toggle = args[1].toLowerCase();
-
-    if (isNaN(keyNum)) {
-        await ctx.reply('❌ First argument must be a key number.');
-        return;
-    }
-
-    if (toggle !== 'on' && toggle !== 'off') {
-        await ctx.reply('❌ Second argument must be "on" or "off".');
-        return;
-    }
-
-    try {
-        const enabled = toggle === 'on';
-        store.setAutoList(userId, keyNum, enabled);
-        const keys = store.getWalletKeys(userId);
-        const key = keys[keyNum - 1];
-        const label = key?.name || `Key ${keyNum}`;
-
-        if (enabled && !config.openSeaApiKey) {
-            await ctx.reply(
-                `⚠️ Auto-list enabled for "${label}", but OpenSea API key is not configured.\n` +
-                `Contact the admin to set OPENSEA_API_KEY.`
-            );
-        } else {
-            await ctx.reply(
-                `✅ Auto-list ${enabled ? 'enabled' : 'disabled'} for "${label}" (\`${key?.address}\`)`,
-                { parse_mode: 'Markdown' }
-            );
-        }
-    } catch (err: any) {
-        await ctx.reply(`❌ ${err.message}`);
-    }
-});
 
 bot.command('deleteaccount', async (ctx) => {
     touchUser(ctx);
@@ -646,9 +584,7 @@ bot.command('help', async (ctx) => {
         `/track <address> [name] - Track a wallet\n` +
         `/remove <address> - Stop tracking wallet\n` +
         `/mywallets - View tracked wallets\n\n` +
-        `**Stats & Settings:**\n` +
-        `/stats - View your mint statistics\n` +
-        `/autolist - Auto-list mints on OpenSea\n\n` +
+        `/stats - View your mint statistics\n\n` +
         `**Info:**\n` +
         `/status - Check bot status\n` +
         `/deleteaccount - Delete all data\n` +
