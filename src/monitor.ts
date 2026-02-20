@@ -39,16 +39,6 @@ const chains: ChainConfig[] = [
         pollInterval: 5000,
     },
     {
-        name: 'ARB',
-        rpcUrls: [
-            config.rpcUrlArb,
-            'https://arbitrum-one-rpc.publicnode.com',
-            'https://rpc.ankr.com/arbitrum',
-        ].filter(Boolean),
-        wsUrl: config.wsUrlArb,
-        pollInterval: 3000,
-    },
-    {
         name: 'POLY',
         rpcUrls: [
             config.rpcUrlPoly,

@@ -56,6 +56,33 @@ function getExplorerUrl(chainName: string, txHash: string): string {
     }
 }
 
+/** 
+ * Decodes human-readable revert reasons from contract error data.
+ * Handles Error(string) and Panic(uint256) selectors.
+ */
+function decodeRevertReason(data: string): string {
+    if (!data || data === '0x') return 'Execution reverted';
+
+    // 0x08c379a0: Error(string)
+    if (data.startsWith('0x08c379a0')) {
+        try {
+            // Remove selector and decode as string
+            const reason = ethers.AbiCoder.defaultAbiCoder().decode(['string'], '0x' + data.substring(10));
+            return reason[0];
+        } catch {
+            return 'Contract rejected (custom error)';
+        }
+    }
+
+    // 0x4e487b71: Panic(uint256)
+    if (data.startsWith('0x4e487b71')) {
+        return 'Contract panicked (internal error)';
+    }
+
+    // Default to showing just the selector if unknown
+    return `Contract rejected (${data.substring(0, 10)})`;
+}
+
 // ─── Allowlist Pre-Check (estimateGas before sending) ───
 
 async function preCheckMint(
@@ -85,7 +112,7 @@ async function preCheckMint(
             reason = 'Insufficient gas funds';
         } else if (msg.includes('unknown custom error') || msg.includes('execution reverted')) {
             const dataMatch = err.message?.match(/data="(0x[a-fA-F0-9]+)"/);
-            reason = dataMatch ? `Contract rejected (${dataMatch[1]})` : 'Contract rejected';
+            reason = dataMatch ? decodeRevertReason(dataMatch[1]) : 'Contract rejected';
         }
 
         console.log(`[${chainName}]   🛡️ [${keyName}] Pre-check FAILED: ${reason}`);
@@ -179,7 +206,8 @@ async function attemptSingleMint({
         } else if (errorMsg.includes('gas') || errorMsg.includes('underpriced')) {
             reason = 'Gas too low';
         } else if (errorMsg.includes('revert')) {
-            reason = 'Transaction reverted';
+            const dataMatch = error.message?.match(/data="(0x[a-fA-F0-9]+)"/);
+            reason = dataMatch ? decodeRevertReason(dataMatch[1]) : 'Transaction reverted';
         }
 
         return { success: false, keyName, address: signer.address, error: reason };
