@@ -5,7 +5,7 @@
   "main": "dist/bot.js",
   "scripts": {
     "build": "tsc",
-    "start": "node --max-old-space-size=512 dist/bot.js",
+    "start": "node --max-old-space-size=1024 dist/bot.js",
     "dev": "nodemon --watch 'src/**/*.ts' --exec 'ts-node' src/bot.ts"
   },
   "dependencies": {
