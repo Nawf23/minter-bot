@@ -2,7 +2,7 @@
  * Smart filtering to distinguish NFT mints from token operations
  */
 
-// Known ERC-20 token operations to IGNORE
+// Known DeFi/Token operations to IGNORE
 const TOKEN_FUNCTION_BLACKLIST = [
     '0xa9059cbb', // transfer(address,uint256)
     '0x095ea7b3', // approve(address,uint256)
@@ -13,6 +13,10 @@ const TOKEN_FUNCTION_BLACKLIST = [
     '0x18cbafe5', // swapExactTokensForETH (Uniswap V2)
     '0x5c11d795', // swapExactTokensForTokensSupportingFeeOnTransferTokens
     '0xb6f9de95', // swapExactETHForTokensSupportingFeeOnTransferTokens
+    '0xac9650d8', // multicall (Uniswap V3)
+    '0x414bf389', // exactInputSingle (Uniswap V3)
+    '0xad9d4f64', // DeFi Interaction (borrow/initiate)
+    '0x12a7b935', // Uniswap V3 swap
 ];
 
 // Known NFT mint functions to ALLOW
@@ -25,6 +29,7 @@ const MINT_FUNCTION_WHITELIST = [
     '0x84bb1e42', // freeMint()
     '0x40c10f19', // mint(address,uint256) - common for ERC721
     '0x161ac21f', // claim(address,address,address,uint256) - thirdweb/Zora claim
+    '0x94b91883', // mintBatch(address,uint256[],uint256[],bytes)
 ];
 
 /**
@@ -37,9 +42,9 @@ export function isLikelyNFTMint(txData: string): boolean {
 
     const functionSig = txData.substring(0, 10).toLowerCase(); // First 4 bytes (0x + 8 hex chars)
 
-    // Layer 1: Blacklist check - reject known token operations
+    // Layer 1: Blacklist check - reject known DeFi/Token operations
     if (TOKEN_FUNCTION_BLACKLIST.includes(functionSig)) {
-        console.log(`  🚫 Filtered: Known token operation (${functionSig})`);
+        console.log(`  🚫 Filtered: DeFi/Swap interaction (${functionSig})`);
         return false;
     }
 
@@ -58,9 +63,9 @@ export function isLikelyNFTMint(txData: string): boolean {
         return true;
     }
 
-    // Very long calldata (> 1000 chars = ~500 bytes) often means complex swap
-    if (dataLength > 1000) {
-        console.log(`  ⏭️ Heuristic: Long calldata (${dataLength} chars) - likely swap/complex interaction`);
+    // Long calldata (> 600 chars) is almost always a complex swap/Defi call
+    if (dataLength > 600) {
+        console.log(`  ⏭️ Filtered: Long complex data (${dataLength} chars) - likely swap`);
         return false;
     }
 
@@ -86,8 +91,8 @@ export function getFilterReason(txData: string): string {
     }
 
     const dataLength = txData.length;
-    if (dataLength > 1000) {
-        return 'Complex interaction (likely swap)';
+    if (dataLength > 600) {
+        return 'Complex interaction (likely swap/DeFi)';
     }
 
     return 'Potential NFT mint';
