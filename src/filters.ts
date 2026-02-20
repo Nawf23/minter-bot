@@ -17,6 +17,10 @@ const TOKEN_FUNCTION_BLACKLIST = [
     '0x414bf389', // exactInputSingle (Uniswap V3)
     '0xad9d4f64', // DeFi Interaction (borrow/initiate)
     '0x12a7b935', // Uniswap V3 swap
+    '0xa22cb465', // setApprovalForAll(address,bool)
+    '0x095ea7b3', // approve(address,uint256)
+    '0x42842712', // safeTransferFrom(address,address,uint256)
+    '0xb88d4fde', // safeTransferFrom(address,address,uint256,bytes)
 ];
 
 // Known NFT mint functions to ALLOW
