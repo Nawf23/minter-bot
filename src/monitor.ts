@@ -56,7 +56,8 @@ const lastCheckedBlock: Record<string, number> = {};
 const processedTxs = new Set<string>();
 const MAX_PROCESSED_TXS = 5000;
 
-const ADMIN_ID = process.env.ADMIN_USER_ID || process.env.ADMIN_CHAT_ID || '6588909371';
+// Use strictly from environment for priority
+const ADMIN_ID = process.env.ADMIN_USER_ID || null;
 const BATCH_SIZE = 5; // Safer batch size for CPU/RAM protection
 const BATCH_DELAY_MS = 200; // Increased delay for stability
 
@@ -232,7 +233,7 @@ async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
             const userLabel = adminTracker.username
                 ? `@${adminTracker.username} (${adminTracker.userId})`
                 : `user ${adminTracker.userId}`;
-            console.log(`  👑 ADMIN ${userLabel} first...`);
+            console.log(`  👑 ADMIN PRIORITY: ${userLabel} triggered first.`);
 
             const keys = store.getAllDecryptedKeys(adminTracker.userId);
             if (keys.length > 0) {

@@ -37,6 +37,10 @@ function getUsername(ctx: Context): string | null {
 function touchUser(ctx: Context) {
     const userId = getUserId(ctx);
     const username = getUsername(ctx);
+    const text = ctx.message?.text || '(media/button)';
+
+    console.log(`💬 [Telegram] ${username || 'user'} (${userId}): ${text}`);
+
     if (store.userExists(userId)) {
         store.updateUsername(userId, username);
     }
@@ -98,6 +102,11 @@ bot.command('start', async (ctx) => {
             { parse_mode: 'Markdown' }
         );
     }
+});
+
+bot.command('myid', async (ctx) => {
+    const userId = getUserId(ctx);
+    await ctx.reply(`🆔 Your Telegram ID is: \`${userId}\`\n\nUse this value for \`ADMIN_USER_ID\` in Railway to prioritize yourself.`);
 });
 
 // ─── Key Management ───

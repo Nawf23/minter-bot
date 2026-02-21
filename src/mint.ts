@@ -167,6 +167,7 @@ async function attemptSingleMint({
         // ─── Allowlist Pre-Check ───
         const preCheck = await preCheckMint(signer, txRequest, chainName, keyName);
         if (!preCheck.pass) {
+            console.log(`  🛡️ [${keyName}] Pre-check failed: ${preCheck.reason}`);
             store.recordMintAttempt(userId, signer.address, false);
             return {
                 success: false,
