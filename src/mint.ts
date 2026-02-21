@@ -233,7 +233,9 @@ export async function attemptMintAllKeys({
             `Cost: ${cost} ETH | Chain: ${chainName}\n\n` +
             `_I only auto-mint free NFTs._`,
             { parse_mode: "Markdown" }
-        ).catch((err: any) => {
+        ).then(() => {
+            console.log(`  📱 [${userLabel}] Skip notification sent`);
+        }).catch((err: any) => {
             console.error(`[${chainName}] ⚠️ [${userLabel}] Skip notification failed: ${err.message}`);
         });
 
