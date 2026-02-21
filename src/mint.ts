@@ -79,6 +79,11 @@ function decodeRevertReason(data: string): string {
         return 'Contract panicked (internal error)';
     }
 
+    // SeaDrop: MintQuantityExceedsMaxMintedPerWallet
+    if (data.startsWith('0xedc01273')) {
+        return 'Max per wallet reached (SeaDrop)';
+    }
+
     // Default to showing just the selector if unknown
     return `Contract rejected (${data.substring(0, 10)})`;
 }
@@ -295,12 +300,13 @@ export async function attemptMintAllKeys({
     let msg = '';
 
     if (successes.length > 0) {
-        msg += `🚀 *Mint Results* (${chainName})\n\n`;
+        msg += `🚀 *Transactions Broadcast* (${chainName})\n\n`;
         for (const r of successes) {
             const label = r.keyName ? `"${r.keyName}"` : 'Key';
-            msg += `✅ ${label} (\`${r.address}\`)\n`;
+            msg += `📨 ${label} (\`${r.address}\`)\n`;
             msg += `   → [View on Explorer](${r.explorerUrl})\n\n`;
         }
+        msg += `_Note: Transactions are broadcast but not yet confirmed._\n\n`;
     }
 
     if (failures.length > 0) {
