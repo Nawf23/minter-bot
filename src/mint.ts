@@ -225,15 +225,18 @@ export async function attemptMintAllKeys({
     if (originalTx.value > 0n) {
         const cost = ethers.formatEther(originalTx.value);
         console.log(`[${chainName}] ⏭️ [${userLabel}] Skipped paid mint: ${cost} ETH`);
-        try {
-            await bot.api.sendMessage(chatId,
-                `⚠️ *Skipped Paid Mint*\n\n` +
-                `Target: \`${originalTx.to}\`\n` +
-                `Cost: ${cost} ETH | Chain: ${chainName}\n\n` +
-                `_I only auto-mint free NFTs._`,
-                { parse_mode: "Markdown" }
-            );
-        } catch { }
+
+        // Notify user about skipping paid mint (non-blocking)
+        bot.api.sendMessage(chatId,
+            `⚠️ *Skipped Paid Mint*\n\n` +
+            `Target: \`${originalTx.to}\`\n` +
+            `Cost: ${cost} ETH | Chain: ${chainName}\n\n` +
+            `_I only auto-mint free NFTs._`,
+            { parse_mode: "Markdown" }
+        ).catch((err: any) => {
+            console.error(`[${chainName}] ⚠️ [${userLabel}] Skip notification failed: ${err.message}`);
+        });
+
         return keys.map(k => ({ success: false, keyName: k.name, address: k.address, error: `Paid (${cost} ETH)` }));
     }
 
