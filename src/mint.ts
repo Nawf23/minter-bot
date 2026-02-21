@@ -115,12 +115,19 @@ async function preCheckMint(
             reason = 'Mint ended';
         } else if (msg.includes('insufficient funds')) {
             reason = 'Insufficient gas funds';
-        } else if (msg.includes('unknown custom error') || msg.includes('execution reverted')) {
+        } else if (msg.includes('unknown custom error') || msg.includes('execution reverted') || msg.includes('reverted')) {
             const dataMatch = err.message?.match(/data="(0x[a-fA-F0-9]+)"/);
             reason = dataMatch ? decodeRevertReason(dataMatch[1]) : 'Contract rejected';
+        } else {
+            // Unhandled error pattern - log raw message for debugging
+            reason = msg.length > 100 ? msg.substring(0, 100) + '...' : msg;
         }
 
         console.log(`[${chainName}]   🛡️ [${keyName}] Pre-check FAILED: ${reason}`);
+        // If we still just have a generic failure, log the raw error for developer investigation
+        if (reason.toLowerCase().includes('pre-check failed') || reason.toLowerCase().includes('rejected')) {
+            console.log(`[${chainName}]   DEBUG [${keyName}] Raw error from provider: ${err.message}`);
+        }
         return { pass: false, reason };
     }
 }
