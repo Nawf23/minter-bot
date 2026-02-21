@@ -95,6 +95,11 @@ export function genericReplaceAddress(
     const originalPadded = originalAddress.toLowerCase().replace('0x', '').padStart(64, '0');
     const newPadded = newAddress.toLowerCase().replace('0x', '').padStart(64, '0');
 
+    // SAFEGUARD: If addresses are identical, return original to avoid infinite loop
+    if (originalPadded === newPadded) {
+        return { data: calldata, replacements: 0 };
+    }
+
     // Only search in the params section (after the 4-byte function selector)
     const selector = calldata.substring(0, 10); // "0x" + 8 hex chars
     let params = calldata.substring(10);

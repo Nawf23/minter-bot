@@ -136,6 +136,12 @@ async function attemptSingleMint({
             return { success: false, keyName, address: signer.address, error: `Skipped paid mint (${cost} ETH)` };
         }
 
+        // Self-Copy protection: Don't copy our own transactions
+        if (originalTx.from.toLowerCase() === signer.address.toLowerCase()) {
+            console.log(`[${chainName}]   ⏭️ [${keyName}] Skipping self-copy`);
+            return { success: false, keyName, address: signer.address, error: 'Self-copy skipped' };
+        }
+
         // Construct calldata with address replacement
         let calldata = originalTx.data;
         let addressReplaced = false;
