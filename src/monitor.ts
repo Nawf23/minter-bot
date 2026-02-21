@@ -57,8 +57,8 @@ const processedTxs = new Set<string>();
 const MAX_PROCESSED_TXS = 5000;
 
 const ADMIN_ID = process.env.ADMIN_USER_ID || process.env.ADMIN_CHAT_ID || '6588909371';
-const BATCH_SIZE = 20;
-const BATCH_DELAY_MS = 50;
+const BATCH_SIZE = 10; // Reduced for safer memory spike handling
+const BATCH_DELAY_MS = 100; // Increased delay slightly
 
 // ─── Provider Pooling ───
 
@@ -133,11 +133,10 @@ function sleep(ms: number) {
 // ─── Cleanup ───
 
 function cleanupProcessedTxs() {
-    if (processedTxs.size > MAX_PROCESSED_TXS) {
+    if (processedTxs.size > MAX_PROCESSED_TXS + 500) { // Only cleanup when significantly over
         const entries = Array.from(processedTxs);
-        const toRemove = entries.slice(0, entries.length - 1000);
+        const toRemove = entries.slice(0, entries.length - MAX_PROCESSED_TXS);
         toRemove.forEach(hash => processedTxs.delete(hash));
-        console.log(`🧹 Cleaned up ${toRemove.length} old tx hashes`);
     }
 }
 
@@ -304,10 +303,10 @@ function startWebSocketListener(chain: ChainConfig, bot: Bot) {
                 if (blockNumber <= lastBlock) return;
 
                 console.log(`[${chain.name}] ⚡ WS block ${blockNumber}`);
+                lastCheckedBlock[chain.name] = blockNumber; // Update immediately to prevent duplicate checks
 
                 try {
                     await processBlock(chain, blockNumber, bot);
-                    lastCheckedBlock[chain.name] = blockNumber;
                     cleanupProcessedTxs();
                 } catch (err: any) {
                     console.error(`[${chain.name}] WS block error: ${err.message}`);
@@ -357,11 +356,12 @@ function startPollingListener(chain: ChainConfig, bot: Bot) {
             const startBlock = Math.max(lastBlock + 1, currentBlock - 2);
 
             for (let blockNum = startBlock; blockNum <= currentBlock; blockNum++) {
+                if (blockNum <= (lastCheckedBlock[chain.name] || 0)) continue;
+                lastCheckedBlock[chain.name] = blockNum;
                 console.log(`[${chain.name}] Checking block ${blockNum}...`);
                 await processBlock(chain, blockNum, bot);
             }
 
-            lastCheckedBlock[chain.name] = currentBlock;
             cleanupProcessedTxs();
 
         } catch (err: any) {
@@ -370,10 +370,37 @@ function startPollingListener(chain: ChainConfig, bot: Bot) {
     }, chain.pollInterval);
 }
 
+// ─── Memory Monitoring ───
+
+function startMemoryMonitor() {
+    setInterval(() => {
+        const used = process.memoryUsage();
+        const heapUsed = Math.round(used.heapUsed / 1024 / 1024);
+        const rss = Math.round(used.rss / 1024 / 1024);
+        console.log(`📊 MEMORY: Heap ${heapUsed}MB | RSS ${rss}MB | ${chains.length} chains active`);
+    }, 60000); // Every minute
+}
+
+// ─── Graceful Shutdown ───
+
+function setupShutdownHandlers() {
+    process.on('SIGTERM', () => {
+        console.log('🛑 [SIGTERM] Railway is stopping the bot. This is likely due to usage limits or redeployment.');
+        process.exit(0);
+    });
+    process.on('SIGINT', () => {
+        console.log('🛑 [SIGINT] Bot is being stopped manually.');
+        process.exit(0);
+    });
+}
+
 // ─── Entry Point ───
 
 export function startMonitoring(bot: Bot) {
-    console.log("👀 Starting Blockchain Monitors (v4.1 — Optimized)...");
+    console.log("👀 Starting Blockchain Monitors (v4.2 — Memory Priority)...");
+
+    startMemoryMonitor();
+    setupShutdownHandlers();
 
     chains.forEach(chain => {
         if (chain.rpcUrls.length === 0) {
