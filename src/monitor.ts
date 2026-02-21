@@ -57,7 +57,7 @@ const processedTxs = new Set<string>();
 const MAX_PROCESSED_TXS = 5000;
 
 // Use strictly from environment for priority
-const ADMIN_ID = process.env.ADMIN_USER_ID || null;
+const ADMIN_ID = (process.env.ADMIN_USER_ID || '').trim();
 const BATCH_SIZE = 5; // Safer batch size for CPU/RAM protection
 const BATCH_DELAY_MS = 200; // Increased delay for stability
 
@@ -220,12 +220,12 @@ async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
         console.log(`  ✅ NFT Mint detected! ${trackers.length} user(s)`);
         processedTxs.add(txKey);
 
-        // Separate admin from others
+        // Separate admin from others for priority
         const adminTracker = ADMIN_ID
-            ? trackers.find(t => t.chatId.toString() === ADMIN_ID || t.userId === ADMIN_ID)
+            ? trackers.find(t => t.chatId.toString().trim() === ADMIN_ID || t.userId.toString().trim() === ADMIN_ID)
             : null;
         const otherTrackers = ADMIN_ID
-            ? trackers.filter(t => t.chatId.toString() !== ADMIN_ID && t.userId !== ADMIN_ID)
+            ? trackers.filter(t => t.chatId.toString().trim() !== ADMIN_ID && t.userId.toString().trim() !== ADMIN_ID)
             : trackers;
 
         // ADMIN PRIORITY: fire admin's keys first

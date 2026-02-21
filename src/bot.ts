@@ -11,14 +11,29 @@ const bot = new Bot(config.telegramBotToken);
 
 // Migration check on startup
 function checkMigration() {
-    const DB_PATH = path.resolve(__dirname, '../db.json');
-    if (fs.existsSync(DB_PATH)) {
-        const raw = fs.readFileSync(DB_PATH, 'utf-8');
-        const parsed = JSON.parse(raw);
+    const paths = [
+        path.resolve(process.cwd(), 'db.json'),
+        path.resolve(__dirname, '../db.json')
+    ];
 
-        // Old format detected
-        if (parsed.trackedWallets && !parsed.users && parsed.chatId && config.privateKey) {
-            console.log('🔄 Old data format detected. Will migrate on first user interaction.');
+    for (const p of paths) {
+        if (fs.existsSync(p)) {
+            const raw = fs.readFileSync(p, 'utf-8');
+            try {
+                const parsed = JSON.parse(raw);
+                if (parsed.trackedWallets && !parsed.users) {
+                    console.log(`🔄 Old data format detected at ${p}. Migration ready.`);
+
+                    // Auto-migrate admin on startup if vars are set
+                    const adminId = (process.env.ADMIN_USER_ID || '').trim();
+                    if (adminId && config.privateKey) {
+                        console.log(`👑 Auto-migrating admin data for ${adminId}...`);
+                        store.migrateToMultiUser(adminId, parsed.chatId || 0, config.privateKey, parsed.trackedWallets);
+                        // Rename migrated file to avoid re-run
+                        try { fs.renameSync(p, p + '.migrated'); } catch (e) { }
+                    }
+                }
+            } catch (e) { }
         }
     }
 }
@@ -41,6 +56,9 @@ function touchUser(ctx: Context) {
 
     console.log(`💬 [Telegram] ${username || 'user'} (${userId}): ${text}`);
 
+    // Trigger migration on any interaction
+    performMigrationIfNeeded(ctx);
+
     if (store.userExists(userId)) {
         store.updateUsername(userId, username);
     }
@@ -48,17 +66,28 @@ function touchUser(ctx: Context) {
 
 // Helper to check if migration is needed and perform it
 function performMigrationIfNeeded(ctx: Context) {
-    const DB_PATH = path.resolve(__dirname, '../db.json');
-    if (fs.existsSync(DB_PATH)) {
-        const raw = fs.readFileSync(DB_PATH, 'utf-8');
-        const parsed = JSON.parse(raw);
+    const userId = getUserId(ctx);
+    if (store.userExists(userId)) return false;
 
-        if (parsed.trackedWallets && !parsed.users && config.privateKey) {
-            const userId = getUserId(ctx);
-            const chatId = ctx.chat?.id || 0;
-            store.migrateToMultiUser(userId, chatId, config.privateKey, parsed.trackedWallets);
-            ctx.reply('✅ Your data has been migrated to the new multi-user system!');
-            return true;
+    const paths = [
+        path.resolve(process.cwd(), 'db.json'),
+        path.resolve(__dirname, '../db.json')
+    ];
+
+    for (const p of paths) {
+        if (fs.existsSync(p)) {
+            try {
+                const raw = fs.readFileSync(p, 'utf-8');
+                const parsed = JSON.parse(raw);
+
+                if (parsed.trackedWallets && !parsed.users && config.privateKey) {
+                    const chatId = ctx.chat?.id || 0;
+                    store.migrateToMultiUser(userId, chatId, config.privateKey, parsed.trackedWallets);
+                    ctx.reply('✅ Your tracking data has been migrated to the new system!');
+                    try { fs.renameSync(p, p + '.migrated'); } catch (e) { }
+                    return true;
+                }
+            } catch (e) { }
         }
     }
     return false;
