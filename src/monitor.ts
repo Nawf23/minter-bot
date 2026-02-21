@@ -57,8 +57,8 @@ const processedTxs = new Set<string>();
 const MAX_PROCESSED_TXS = 5000;
 
 const ADMIN_ID = process.env.ADMIN_USER_ID || process.env.ADMIN_CHAT_ID || '6588909371';
-const BATCH_SIZE = 10; // Reduced for safer memory spike handling
-const BATCH_DELAY_MS = 100; // Increased delay slightly
+const BATCH_SIZE = 5; // Safer batch size for CPU/RAM protection
+const BATCH_DELAY_MS = 200; // Increased delay for stability
 
 // ─── Provider Pooling ───
 
@@ -176,6 +176,7 @@ async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
     const walletMap = getWalletMap();
     if (walletMap.size === 0) return;
 
+    const startTime = Date.now();
     let block;
     try {
         block = await rpcCallWithRetry(
@@ -189,6 +190,8 @@ async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
     }
 
     if (!block || !block.prefetchedTransactions) return;
+
+    const txCount = block.prefetchedTransactions.length;
 
     for (const tx of block.prefetchedTransactions) {
         const fromAddr = tx.from.toLowerCase();
@@ -377,7 +380,23 @@ function startMemoryMonitor() {
         const used = process.memoryUsage();
         const heapUsed = Math.round(used.heapUsed / 1024 / 1024);
         const rss = Math.round(used.rss / 1024 / 1024);
-        console.log(`📊 MEMORY: Heap ${heapUsed}MB | RSS ${rss}MB | ${chains.length} chains active`);
+
+        // Dynamic Warning based on 2GB Railway Limit
+        const RAILWAY_LIMIT_MB = 2048;
+        const usagePercent = (rss / RAILWAY_LIMIT_MB) * 100;
+
+        let status = '🟢 GOOD';
+        if (usagePercent > 85) status = '🔴 CRITICAL';
+        else if (usagePercent > 70) status = '🟡 HIGH';
+
+        console.log(`📊 [${status}] Memory: Heap ${heapUsed}MB | RSS ${rss}MB (${Math.round(usagePercent)}%) | ${chains.length} chains`);
+
+        if (usagePercent > 92) {
+            console.warn('🚨 MEMORY CRITICAL! Triggering emergency cleanup...');
+            if (global.gc) {
+                global.gc();
+            }
+        }
     }, 60000); // Every minute
 }
 
