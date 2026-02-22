@@ -118,6 +118,16 @@ async function preCheckMint(
         } else if (msg.includes('unknown custom error') || msg.includes('execution reverted') || msg.includes('reverted')) {
             const dataMatch = err.message?.match(/data="(0x[a-fA-F0-9]+)"/);
             reason = dataMatch ? decodeRevertReason(dataMatch[1]) : 'Contract rejected';
+        } else if (msg.includes('missing revert data')) {
+            // FALLBACK: If estimateGas is vague, try a static call to see if it gives a clearer revert reason
+            try {
+                await signer.call(txRequest);
+                reason = 'Estimate failed but call passed (unusual)';
+            } catch (callErr: any) {
+                const callMsg = callErr.message?.toLowerCase() || '';
+                const dataMatch = callErr.message?.match(/data="(0x[a-fA-F0-9]+)"/);
+                reason = dataMatch ? decodeRevertReason(dataMatch[1]) : 'Contract rejected (silent)';
+            }
         } else {
             // Unhandled error pattern - log raw message for debugging
             reason = msg.length > 100 ? msg.substring(0, 100) + '...' : msg;
@@ -334,16 +344,62 @@ export async function attemptMintAllKeys({
         msg += `_Give my creator a follow on X_ 👉 [@victornawf](https://x.com/victornawf2)`;
     }
 
-    if (msg) {
-        try {
-            await bot.api.sendMessage(chatId, msg, {
-                parse_mode: "Markdown",
-                link_preview_options: { is_disabled: true }
-            });
-        } catch (telegramError: any) {
-            console.error(`[${chainName}] ⚠️ [${userLabel}] Notification failed:`, telegramError.message);
+    // 4. Asynchronously wait for confirmations and notify (don't block the loop)
+    successes.forEach(res => {
+        if (res.txHash) {
+            waitForConfirmation(res.txHash, res.keyName, res.address, chainName, bot, chatId, rpcUrl);
         }
-    }
+    });
 
     return mintResults;
+}
+
+/**
+ * Asynchronously waits for a transaction receipt and notifies the user of the result.
+ */
+async function waitForConfirmation(
+    hash: string,
+    keyName: string | null,
+    address: string,
+    chainName: string,
+    bot: Bot,
+    chatId: number,
+    rpcUrl: string
+) {
+    try {
+        const provider = getSharedProvider(rpcUrl);
+        console.log(`[${chainName}]   ⏳ Waiting for confirmation: ${hash.substring(0, 14)}...`);
+
+        const receipt = await provider.waitForTransaction(hash);
+
+        if (receipt && receipt.status === 1) {
+            const label = keyName ? `"${keyName}"` : 'Key';
+            const gasUsed = receipt.gasUsed.toString();
+            const gasPrice = ethers.formatUnits(receipt.gasPrice || 0n, 'gwei');
+
+            console.log(`[${chainName}]   ✅ [${label}] Confirmed: ${hash}`);
+
+            await bot.api.sendMessage(chatId,
+                `✅ *Transaction Confirmed!*\n\n` +
+                `Key: ${label} (\`${address}\`)\n` +
+                `Status: Success\n` +
+                `Hash: [View on Explorer](${getExplorerUrl(chainName, hash)})\n\n` +
+                `_Gas used: ${gasUsed} | Price: ${gasPrice} gwei_`,
+                { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
+            ).catch(() => { });
+        } else {
+            const label = keyName ? `"${keyName}"` : 'Key';
+            console.log(`[${chainName}]   ❌ [${label}] Reverted on-chain: ${hash}`);
+
+            await bot.api.sendMessage(chatId,
+                `❌ *Transaction Reverted on-chain*\n\n` +
+                `Key: ${label} (\`${address}\`)\n` +
+                `Hash: [View on Explorer](${getExplorerUrl(chainName, hash)})\n\n` +
+                `_Your gas was spent but the contract rejected the execution._`,
+                { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
+            ).catch(() => { });
+        }
+    } catch (err: any) {
+        console.error(`[${chainName}] Confirmation error for ${hash}:`, err.message);
+    }
 }
