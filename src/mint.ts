@@ -330,7 +330,10 @@ export async function attemptMintAllKeys({
         if (successes.length === 0) msg += `❌ *Mint Failed* (${chainName})\n\n`;
         for (const r of failures) {
             const label = r.keyName ? `"${r.keyName}"` : 'Key';
-            const icon = r.skippedPrecheck ? '🛡️' : '❌';
+            let icon = '❌';
+            if (r.skippedPrecheck) icon = '🛡️';
+            if (r.error?.includes('Insufficient ETH')) icon = '💰';
+
             msg += `${icon} ${label} (\`${r.address}\`)\n`;
             msg += `   → ${r.error}\n\n`;
         }
@@ -344,7 +347,15 @@ export async function attemptMintAllKeys({
         msg += `_Give my creator a follow on X_ 👉 [@victornawf](https://x.com/victornawf2)`;
     }
 
-    // 4. Asynchronously wait for confirmations and notify (don't block the loop)
+    // 4. Send bundled notification
+    if (msg) {
+        bot.api.sendMessage(chatId, msg, {
+            parse_mode: "Markdown",
+            link_preview_options: { is_disabled: true }
+        }).catch(err => console.error(`[${chainName}] Failed to send results: ${err.message}`));
+    }
+
+    // 5. Asynchronously wait for confirmations and notify (don't block the loop)
     successes.forEach(res => {
         if (res.txHash) {
             waitForConfirmation(res.txHash, res.keyName, res.address, chainName, bot, chatId, rpcUrl);

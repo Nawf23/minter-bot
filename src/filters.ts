@@ -21,6 +21,8 @@ const TOKEN_FUNCTION_BLACKLIST = [
     '0x095ea7b3', // approve(address,uint256)
     '0x42842712', // safeTransferFrom(address,address,uint256)
     '0xb88d4fde', // safeTransferFrom(address,address,uint256,bytes)
+    '0x2e1a7d4d', // withdraw(uint256) - WETH unwrap
+    '0xd0e30db0', // deposit() - WETH wrap
 ];
 
 // Known NFT mint functions to ALLOW
