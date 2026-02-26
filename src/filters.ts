@@ -36,6 +36,11 @@ const MINT_FUNCTION_WHITELIST = [
     '0x40c10f19', // mint(address,uint256) - common for ERC721
     '0x161ac21f', // claim(address,address,address,uint256) - thirdweb/Zora claim
     '0x94b91883', // mintBatch(address,uint256[],uint256[],bytes)
+    // SeaDrop mint functions (can have long calldata with signatures/proofs)
+    '0x4b61cd6f', // mintSigned(address,address,address,uint256,...) - SeaDrop
+    '0x26bf076a', // mintPublic(address,address,address,uint256) - SeaDrop v1
+    '0x2e69ed7f', // mintAllowList(address,address,address,uint256,...) - SeaDrop
+    '0x6ab93230', // mintAllowedTokenHolder(address,address,address,...) - SeaDrop
 ];
 
 /**
@@ -69,8 +74,9 @@ export function isLikelyNFTMint(txData: string): boolean {
         return true;
     }
 
-    // Long calldata (> 600 chars) is almost always a complex swap/Defi call
-    if (dataLength > 600) {
+    // Long calldata (> 2000 chars) is almost always a complex swap/DeFi call
+    // Note: SeaDrop mints with signatures can be 600-1500 chars, so threshold raised from 600
+    if (dataLength > 2000) {
         console.log(`  ⏭️ Filtered: Long complex data (${dataLength} chars) - likely swap`);
         return false;
     }
