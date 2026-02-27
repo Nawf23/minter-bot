@@ -18,11 +18,21 @@ const TOKEN_FUNCTION_BLACKLIST = [
     '0xad9d4f64', // DeFi Interaction (borrow/initiate)
     '0x12a7b935', // Uniswap V3 swap
     '0xa22cb465', // setApprovalForAll(address,bool)
-    '0x095ea7b3', // approve(address,uint256)
     '0x42842712', // safeTransferFrom(address,address,uint256)
     '0xb88d4fde', // safeTransferFrom(address,address,uint256,bytes)
     '0x2e1a7d4d', // withdraw(uint256) - WETH unwrap
     '0xd0e30db0', // deposit() - WETH wrap
+    // Short-calldata DeFi functions that trick the "short = mint" heuristic
+    '0x3ccfd60b', // withdraw() - no-param withdraw (staking, vesting, etc.)
+    '0x853828b6', // withdrawAll() - withdraw everything
+    '0xe9fad8ee', // exit() - unstake + claim rewards
+    '0x3d18b912', // getReward() - claim staking rewards
+    '0x4e71d92d', // claim() — MOVED from whitelist: too generic, used by staking too
+    '0xdb006a75', // redeem(uint256) - lending/staking redeem
+    '0x2f745c59', // tokenOfOwnerByIndex - read-only, not a mint
+    '0x61d027b3', // treasury() - read-only
+    '0x372500ab', // claimRewards() - staking rewards
+    '0x2a4108a2', // claimFor(address) - claim on behalf
 ];
 
 // Known NFT mint functions to ALLOW
@@ -31,10 +41,9 @@ const MINT_FUNCTION_WHITELIST = [
     '0x6a627842', // mint(address)
     '0xa0712d68', // mint(uint256)
     '0x2db11544', // publicMint()
-    '0x4e71d92d', // claim()
     '0x84bb1e42', // freeMint()
     '0x40c10f19', // mint(address,uint256) - common for ERC721
-    '0x161ac21f', // claim(address,address,address,uint256) - thirdweb/Zora claim
+    '0x161ac21f', // claim(address,address,address,uint256) - thirdweb/Zora claim (specific, safe)
     '0x94b91883', // mintBatch(address,uint256[],uint256[],bytes)
     // SeaDrop mint functions (can have long calldata with signatures/proofs)
     '0x4b61cd6f', // mintSigned(address,address,address,uint256,...) - SeaDrop
