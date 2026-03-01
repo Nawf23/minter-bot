@@ -21,6 +21,11 @@ export const config = {
     wsUrlOp: process.env.WS_URL_OP || '',
     wsUrlPoly: process.env.WS_URL_POLY || '',
 
+    // ─── Alchemy WebSocket RPCs (filtered pending tx subscriptions) ───
+    alchemyWsEth: process.env.ALCHEMY_WS_ETH || '',
+    alchemyWsBase: process.env.ALCHEMY_WS_BASE || '',
+    alchemyWsPoly: process.env.ALCHEMY_WS_POLY || '',
+
     // ─── Legacy ───
     privateKey: process.env.PRIVATE_KEY || '',
 

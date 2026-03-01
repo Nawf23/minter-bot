@@ -1,10 +1,11 @@
-// @ts-nocheck force update v4 — multi-key + websocket + multi-chain
+// @ts-nocheck v5 — Alchemy filtered pending tx subscriptions + lightweight fallback
 import { ethers } from 'ethers';
+import WebSocket from 'ws';
 import { config } from './config';
 import { store } from './store';
 import { attemptMintAllKeys } from './mint';
 import { Bot } from 'grammy';
-import { isLikelyNFTMint, getFilterReason } from './filters';
+import { isLikelyNFTMint } from './filters';
 import { getSharedProvider } from './rpc_utils';
 
 // ─── Chain Configuration ───
@@ -12,8 +13,9 @@ import { getSharedProvider } from './rpc_utils';
 interface ChainConfig {
     name: string;
     rpcUrls: string[];
-    wsUrl: string;          // WebSocket URL (empty = polling only)
-    pollInterval: number;   // ms between polls (fallback when WS active)
+    alchemyWsUrl: string;    // Alchemy WebSocket URL for filtered pending txs
+    wsUrl: string;            // Generic WebSocket URL (fallback)
+    pollInterval: number;     // ms between fallback polls
 }
 
 const chains: ChainConfig[] = [
@@ -23,10 +25,10 @@ const chains: ChainConfig[] = [
             config.rpcUrl,
             'https://ethereum-rpc.publicnode.com',
             'https://rpc.ankr.com/eth',
-            'https://cloudflare-eth.com',
         ].filter(Boolean),
+        alchemyWsUrl: config.alchemyWsEth,
         wsUrl: config.wsUrl,
-        pollInterval: 12000,
+        pollInterval: 30000,  // 30s fallback (Alchemy handles real-time)
     },
     {
         name: 'BASE',
@@ -35,8 +37,9 @@ const chains: ChainConfig[] = [
             'https://base-rpc.publicnode.com',
             'https://rpc.ankr.com/base',
         ].filter(Boolean),
+        alchemyWsUrl: config.alchemyWsBase,
         wsUrl: config.wsUrlBase,
-        pollInterval: 5000,
+        pollInterval: 30000,
     },
     {
         name: 'POLY',
@@ -45,30 +48,29 @@ const chains: ChainConfig[] = [
             'https://polygon-bor-rpc.publicnode.com',
             'https://rpc.ankr.com/polygon',
         ].filter(Boolean),
+        alchemyWsUrl: config.alchemyWsPoly,
         wsUrl: config.wsUrlPoly,
-        pollInterval: 5000,
+        pollInterval: 30000,
     }
 ];
 
 // ─── State ───
 
-const lastCheckedBlock: Record<string, number> = {};
 const processedTxs = new Set<string>();
 const MAX_PROCESSED_TXS = 5000;
+const lastCheckedBlock: Record<string, number> = {};
 
-// Use strictly from environment for priority
 const ADMIN_ID = (process.env.ADMIN_USER_ID || '').trim();
-const BATCH_SIZE = 5; // Safer batch size for CPU/RAM protection
-const BATCH_DELAY_MS = 200; // Increased delay for stability
+const BATCH_SIZE = 5;
+const BATCH_DELAY_MS = 200;
 
-// ─── Provider Pooling ───
+// Track active Alchemy subscriptions for resubscription
+const alchemyConnections: Record<string, WebSocket | null> = {};
+let lastKnownDataVersion = -1;
 
-const wsProviderPool: Record<string, ethers.WebSocketProvider | null> = {};
-
-// ─── Wallet Map Caching ───
+// ─── Wallet Map ───
 
 let cachedWalletMap: Map<string, Array<{ userId: string; chatId: number; username: string | null }>> | null = null;
-let lastKnownDataVersion = -1;
 
 function getWalletMap() {
     if (cachedWalletMap && store.dataVersion === lastKnownDataVersion) {
@@ -96,7 +98,24 @@ function getWalletMap() {
     return map;
 }
 
-// ─── RPC Helpers ───
+function getTrackedAddresses(): string[] {
+    const walletMap = getWalletMap();
+    return Array.from(walletMap.keys());
+}
+
+// ─── Helpers ───
+
+function sleep(ms: number) {
+    return new Promise(r => setTimeout(r, ms));
+}
+
+function cleanupProcessedTxs() {
+    if (processedTxs.size > MAX_PROCESSED_TXS + 500) {
+        const entries = Array.from(processedTxs);
+        const toRemove = entries.slice(0, entries.length - MAX_PROCESSED_TXS);
+        toRemove.forEach(hash => processedTxs.delete(hash));
+    }
+}
 
 async function rpcCallWithRetry<T>(
     rpcUrls: string[],
@@ -127,33 +146,6 @@ async function rpcCallWithRetry<T>(
     throw lastError;
 }
 
-function sleep(ms: number) {
-    return new Promise(r => setTimeout(r, ms));
-}
-
-// ─── Cleanup ───
-
-function cleanupProcessedTxs() {
-    if (processedTxs.size > MAX_PROCESSED_TXS + 500) { // Only cleanup when significantly over
-        const entries = Array.from(processedTxs);
-        const toRemove = entries.slice(0, entries.length - MAX_PROCESSED_TXS);
-        toRemove.forEach(hash => processedTxs.delete(hash));
-    }
-}
-
-/** Look up a friendly name for a tracked address across all users */
-function getTrackedWalletName(address: string): string | null {
-    const allUsers = store.getAllUsers();
-    for (const { data } of allUsers) {
-        for (const w of data.trackedWallets) {
-            if (w.address.toLowerCase() === address.toLowerCase() && w.name) {
-                return w.name;
-            }
-        }
-    }
-    return null;
-}
-
 // ─── Batch Processing ───
 
 async function processMintBatches(
@@ -171,178 +163,230 @@ async function processMintBatches(
     }
 }
 
-// ─── Core Block Processing ───
+// ─── Process a Single Transaction ───
 
-async function processBlock(chain: ChainConfig, blockNum: number, bot: Bot) {
+async function processTx(chain: ChainConfig, tx: any, bot: Bot, source: string) {
+    if (!tx || !tx.hash || !tx.from) return;
+
+    const txKey = tx.hash;
+    if (processedTxs.has(txKey)) return;
+
+    const fromAddr = tx.from.toLowerCase();
     const walletMap = getWalletMap();
-    if (walletMap.size === 0) return;
+    const trackers = walletMap.get(fromAddr);
+    if (!trackers) return;
 
-    const startTime = Date.now();
-    let block;
-    try {
-        block = await rpcCallWithRetry(
-            chain.rpcUrls,
-            (provider) => provider.getBlock(blockNum, true),
-            chain.name
-        );
-    } catch (err: any) {
-        console.error(`[${chain.name}] Failed to fetch block ${blockNum}: ${err.message}`);
+    console.log(`[${chain.name}] 🎯 ${source} TX from tracked wallet ${fromAddr.substring(0, 10)}... (${tx.hash.substring(0, 14)}...)`);
+
+    // Skip if no calldata
+    if (!tx.input || tx.input === '0x') {
+        processedTxs.add(txKey);
+        return;
+    }
+    if (!tx.to) {
+        processedTxs.add(txKey);
         return;
     }
 
-    if (!block || !block.prefetchedTransactions) return;
+    // Use tx.input (Alchemy format) or tx.data (ethers format)
+    const txData = tx.input || tx.data || '';
 
-    const txCount = block.prefetchedTransactions.length;
-
-    for (const tx of block.prefetchedTransactions) {
-        const fromAddr = tx.from.toLowerCase();
-        const trackers = walletMap.get(fromAddr);
-        if (!trackers) continue;
-
-        const txKey = tx.hash;
-        if (processedTxs.has(txKey)) continue;
-
-        console.log(`[${chain.name}] 🎯 TX from tracked wallet ${fromAddr.substring(0, 10)}... (${tx.hash.substring(0, 14)}...)`);
-
-        if (!tx.data || tx.data === '0x') {
-            processedTxs.add(txKey);
-            continue;
-        }
-        if (!tx.to) {
-            processedTxs.add(txKey);
-            continue;
-        }
-        if (!isLikelyNFTMint(tx.data)) {
-            processedTxs.add(txKey);
-            continue;
-        }
-
-        console.log(`  ✅ NFT Mint detected! ${trackers.length} user(s)`);
+    if (!isLikelyNFTMint(txData)) {
         processedTxs.add(txKey);
+        return;
+    }
 
-        // Separate admin from others for priority
-        const adminTracker = ADMIN_ID
-            ? trackers.find(t => t.chatId.toString().trim() === ADMIN_ID || t.userId.toString().trim() === ADMIN_ID)
-            : null;
-        const otherTrackers = ADMIN_ID
-            ? trackers.filter(t => t.chatId.toString().trim() !== ADMIN_ID && t.userId.toString().trim() !== ADMIN_ID)
-            : trackers;
+    console.log(`  ✅ NFT Mint detected via ${source}! ${trackers.length} user(s)`);
+    processedTxs.add(txKey);
 
-        // ADMIN PRIORITY: fire admin's keys first
-        if (adminTracker) {
-            const userLabel = adminTracker.username
-                ? `@${adminTracker.username} (${adminTracker.userId})`
-                : `user ${adminTracker.userId}`;
-            console.log(`  👑 ADMIN PRIORITY: ${userLabel} triggered first.`);
+    // Normalize tx for attemptMintAllKeys (needs ethers TransactionResponse shape)
+    const normalizedTx = {
+        hash: tx.hash,
+        from: tx.from,
+        to: tx.to,
+        data: txData,
+        value: BigInt(tx.value || '0'),
+    };
 
-            const keys = store.getAllDecryptedKeys(adminTracker.userId);
-            if (keys.length > 0) {
+    // Separate admin from others
+    const adminTracker = ADMIN_ID
+        ? trackers.find(t => t.chatId.toString().trim() === ADMIN_ID || t.userId.toString().trim() === ADMIN_ID)
+        : null;
+    const otherTrackers = ADMIN_ID
+        ? trackers.filter(t => t.chatId.toString().trim() !== ADMIN_ID && t.userId.toString().trim() !== ADMIN_ID)
+        : trackers;
+
+    // ADMIN PRIORITY
+    if (adminTracker) {
+        const userLabel = adminTracker.username
+            ? `@${adminTracker.username} (${adminTracker.userId})`
+            : `user ${adminTracker.userId}`;
+        console.log(`  👑 ADMIN PRIORITY: ${userLabel} triggered first.`);
+
+        const keys = store.getAllDecryptedKeys(adminTracker.userId);
+        if (keys.length > 0) {
+            try {
+                await attemptMintAllKeys({
+                    originalTx: normalizedTx as any, bot,
+                    chatId: adminTracker.chatId,
+                    chainName: chain.name,
+                    keys, rpcUrl: chain.rpcUrls[0],
+                    userLabel, userId: adminTracker.userId,
+                });
+            } catch (err: any) {
+                console.error(`  ❌ Admin error: ${err.message}`);
+            }
+        }
+    }
+
+    // Everyone else
+    if (otherTrackers.length > 0) {
+        const mintTasks: Array<() => Promise<void>> = [];
+        for (const tracker of otherTrackers) {
+            const keys = store.getAllDecryptedKeys(tracker.userId);
+            if (keys.length === 0) continue;
+            const userLabel = tracker.username
+                ? `@${tracker.username} (${tracker.userId})`
+                : `user ${tracker.userId}`;
+            mintTasks.push(async () => {
                 try {
                     await attemptMintAllKeys({
-                        originalTx: tx, bot,
-                        chatId: adminTracker.chatId,
+                        originalTx: normalizedTx as any, bot,
+                        chatId: tracker.chatId,
                         chainName: chain.name,
                         keys, rpcUrl: chain.rpcUrls[0],
-                        userLabel, userId: adminTracker.userId,
+                        userLabel, userId: tracker.userId,
                     });
                 } catch (err: any) {
-                    console.error(`  ❌ Admin error: ${err.message}`);
+                    console.error(`  ❌ ${userLabel}: ${err.message}`);
                 }
-            }
+            });
         }
-
-        // Everyone else in staggered batches
-        if (otherTrackers.length > 0) {
-            const mintTasks: Array<() => Promise<void>> = [];
-
-            for (const tracker of otherTrackers) {
-                const keys = store.getAllDecryptedKeys(tracker.userId);
-                if (keys.length === 0) continue;
-
-                const userLabel = tracker.username
-                    ? `@${tracker.username} (${tracker.userId})`
-                    : `user ${tracker.userId}`;
-
-                mintTasks.push(async () => {
-                    try {
-                        await attemptMintAllKeys({
-                            originalTx: tx, bot,
-                            chatId: tracker.chatId,
-                            chainName: chain.name,
-                            keys, rpcUrl: chain.rpcUrls[0],
-                            userLabel, userId: tracker.userId,
-                        });
-                    } catch (err: any) {
-                        console.error(`  ❌ ${userLabel}: ${err.message}`);
-                    }
-                });
-            }
-
-            await processMintBatches(mintTasks, chain.name);
-        }
+        await processMintBatches(mintTasks, chain.name);
     }
 }
 
-// ─── WebSocket Listener ───
+// ─── Alchemy Filtered Pending TX Subscription ───
 
-function startWebSocketListener(chain: ChainConfig, bot: Bot) {
-    if (!chain.wsUrl) return;
+function startAlchemyListener(chain: ChainConfig, bot: Bot) {
+    if (!chain.alchemyWsUrl) return;
 
-    console.log(`  ⚡ [${chain.name}] Starting WebSocket subscription: ${chain.wsUrl.substring(0, 45)}...`);
+    const addresses = getTrackedAddresses();
+    if (addresses.length === 0) {
+        console.log(`  ⏭️ [${chain.name}] No tracked wallets, skipping Alchemy subscription`);
+        return;
+    }
 
-    let wsProvider: ethers.WebSocketProvider | null = null;
+    console.log(`  ⚡ [${chain.name}] Starting Alchemy filtered subscription (${addresses.length} wallets)`);
 
     const connect = () => {
         try {
-            if (wsProviderPool[chain.name]) {
-                wsProviderPool[chain.name]!.destroy();
+            // Clean up old connection
+            if (alchemyConnections[chain.name]) {
+                try { alchemyConnections[chain.name]!.close(); } catch { }
             }
 
-            wsProvider = new ethers.WebSocketProvider(chain.wsUrl);
-            wsProviderPool[chain.name] = wsProvider;
+            const ws = new WebSocket(chain.alchemyWsUrl);
+            alchemyConnections[chain.name] = ws;
 
-            wsProvider.on('block', async (blockNumber: number) => {
-                // Skip if we already processed this block via polling
-                const lastBlock = lastCheckedBlock[chain.name] || 0;
-                if (blockNumber <= lastBlock) return;
+            ws.on('open', () => {
+                console.log(`[${chain.name}] ✅ Alchemy WebSocket connected`);
 
-                console.log(`[${chain.name}] ⚡ WS block ${blockNumber}`);
-                lastCheckedBlock[chain.name] = blockNumber; // Update immediately to prevent duplicate checks
+                // Subscribe to pending transactions from tracked wallets only
+                const subRequest = {
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'eth_subscribe',
+                    params: [
+                        'alchemy_pendingTransactions',
+                        {
+                            fromAddress: addresses,
+                            toAddress: [],
+                            hashesOnly: false,  // Get full tx data
+                        }
+                    ]
+                };
 
+                ws.send(JSON.stringify(subRequest));
+                console.log(`[${chain.name}] 📡 Subscribed to pending txs from ${addresses.length} wallets`);
+            });
+
+            ws.on('message', async (data: Buffer) => {
                 try {
-                    await processBlock(chain, blockNumber, bot);
-                    cleanupProcessedTxs();
+                    const msg = JSON.parse(data.toString());
+
+                    // Subscription confirmation
+                    if (msg.id === 1 && msg.result) {
+                        console.log(`[${chain.name}] ✅ Subscription active: ${msg.result}`);
+                        return;
+                    }
+
+                    // Pending transaction notification
+                    if (msg.method === 'eth_subscription' && msg.params?.result) {
+                        const tx = msg.params.result;
+                        console.log(`[${chain.name}] ⚡ MEMPOOL: Pending tx from ${tx.from?.substring(0, 10)}...`);
+                        await processTx(chain, tx, bot, 'MEMPOOL');
+                        cleanupProcessedTxs();
+                    }
                 } catch (err: any) {
-                    console.error(`[${chain.name}] WS block error: ${err.message}`);
+                    console.error(`[${chain.name}] Alchemy WS parse error: ${err.message}`);
                 }
             });
 
-            wsProvider.on('error', (err: any) => {
-                console.error(`[${chain.name}] ⚠️ WS error: ${err.message}`);
+            ws.on('error', (err: any) => {
+                console.error(`[${chain.name}] ⚠️ Alchemy WS error: ${err.message}`);
             });
 
-            // Monitor for disconnection and reconnect
-            const ws = (wsProvider as any)._websocket || (wsProvider as any).websocket;
-            if (ws) {
-                ws.on('close', () => {
-                    console.log(`[${chain.name}] 🔌 WS disconnected, reconnecting in 5s...`);
-                    wsProviderPool[chain.name] = null;
-                    setTimeout(connect, 5000);
-                });
-            }
+            ws.on('close', () => {
+                console.log(`[${chain.name}] 🔌 Alchemy WS disconnected, reconnecting in 5s...`);
+                alchemyConnections[chain.name] = null;
+                setTimeout(connect, 5000);
+            });
 
         } catch (err: any) {
-            console.error(`[${chain.name}] ❌ WS connection failed: ${err.message}. Falling back to polling.`);
-            wsProviderPool[chain.name] = null;
+            console.error(`[${chain.name}] ❌ Alchemy WS connection failed: ${err.message}`);
+            alchemyConnections[chain.name] = null;
+            setTimeout(connect, 10000);
         }
     };
 
     connect();
 }
 
-// ─── Polling Fallback ───
+// ─── Resubscribe When Wallets Change ───
 
-function startPollingListener(chain: ChainConfig, bot: Bot) {
+function startWalletChangeWatcher(bot: Bot) {
+    let lastVersion = store.dataVersion;
+
+    setInterval(() => {
+        if (store.dataVersion !== lastVersion) {
+            lastVersion = store.dataVersion;
+            console.log('🔄 Wallet list changed, resubscribing Alchemy listeners...');
+
+            // Rebuild cached wallet map
+            cachedWalletMap = null;
+            lastKnownDataVersion = -1;
+
+            // Reconnect all Alchemy listeners with updated addresses
+            for (const chain of chains) {
+                if (chain.alchemyWsUrl) {
+                    startAlchemyListener(chain, bot);
+                }
+            }
+        }
+    }, 2000); // Check every 2 seconds
+}
+
+// ─── Lightweight Polling Fallback ───
+// Only activates for chains WITHOUT Alchemy, or as a safety net
+// Uses getBlock(blockNum, true) but polls much less frequently (every 30s)
+
+function startPollingFallback(chain: ChainConfig, bot: Bot) {
+    const interval = chain.alchemyWsUrl ? chain.pollInterval : 12000; // Faster if no Alchemy
+    const mode = chain.alchemyWsUrl ? 'safety-net' : 'primary';
+
+    console.log(`  📡 [${chain.name}] Polling fallback (${mode}, every ${interval / 1000}s)`);
+
     setInterval(async () => {
         try {
             const walletMap = getWalletMap();
@@ -357,24 +401,45 @@ function startPollingListener(chain: ChainConfig, bot: Bot) {
             const lastBlock = lastCheckedBlock[chain.name] || currentBlock - 1;
             if (currentBlock <= lastBlock) return;
 
-            const startBlock = Math.max(lastBlock + 1, currentBlock - 2);
+            // Only check latest block (not gap-filling — Alchemy handles that)
+            lastCheckedBlock[chain.name] = currentBlock;
 
-            for (let blockNum = startBlock; blockNum <= currentBlock; blockNum++) {
-                if (blockNum <= (lastCheckedBlock[chain.name] || 0)) continue;
-                lastCheckedBlock[chain.name] = blockNum;
-                console.log(`[${chain.name}] Checking block ${blockNum}...`);
-                await processBlock(chain, blockNum, bot);
+            const block = await rpcCallWithRetry(
+                chain.rpcUrls,
+                (provider) => provider.getBlock(currentBlock, true),
+                chain.name
+            );
+
+            if (!block || !block.prefetchedTransactions) return;
+
+            let found = 0;
+            for (const tx of block.prefetchedTransactions) {
+                const fromAddr = tx.from.toLowerCase();
+                if (!walletMap.has(fromAddr)) continue;
+                found++;
+                await processTx(chain, {
+                    hash: tx.hash,
+                    from: tx.from,
+                    to: tx.to,
+                    input: tx.data,
+                    value: tx.value.toString(),
+                }, bot, 'POLL');
+            }
+
+            if (found > 0) {
+                console.log(`[${chain.name}] 📡 Poll caught ${found} tracked tx(s) in block ${currentBlock}`);
             }
 
             cleanupProcessedTxs();
-
         } catch (err: any) {
-            console.error(`[${chain.name}] Poll error: ${err.message}`);
+            if (!err.message?.includes('429') && !err.message?.includes('rate limit')) {
+                console.error(`[${chain.name}] Poll error: ${err.message}`);
+            }
         }
-    }, chain.pollInterval);
+    }, interval);
 }
 
-// ─── Memory Monitoring ───
+// ─── Memory Monitor ───
 
 function startMemoryMonitor() {
     setInterval(() => {
@@ -382,7 +447,6 @@ function startMemoryMonitor() {
         const heapUsed = Math.round(used.heapUsed / 1024 / 1024);
         const rss = Math.round(used.rss / 1024 / 1024);
 
-        // Dynamic Warning based on 2GB Railway Limit
         const RAILWAY_LIMIT_MB = 2048;
         const usagePercent = (rss / RAILWAY_LIMIT_MB) * 100;
 
@@ -394,33 +458,40 @@ function startMemoryMonitor() {
 
         if (usagePercent > 92) {
             console.warn('🚨 MEMORY CRITICAL! Triggering emergency cleanup...');
-            if (global.gc) {
-                global.gc();
-            }
+            if (global.gc) global.gc();
         }
-    }, 60000); // Every minute
+    }, 60000);
 }
 
 // ─── Graceful Shutdown ───
 
 function setupShutdownHandlers() {
-    process.on('SIGTERM', () => {
-        console.log('🛑 [SIGTERM] Railway is stopping the bot. This is likely due to usage limits or redeployment.');
+    const cleanup = (signal: string) => {
+        console.log(`🛑 [${signal}] Shutting down...`);
+        // Close all Alchemy WebSocket connections
+        for (const [name, ws] of Object.entries(alchemyConnections)) {
+            if (ws) {
+                try { ws.close(); } catch { }
+                console.log(`  🔌 Closed Alchemy WS for ${name}`);
+            }
+        }
         process.exit(0);
-    });
-    process.on('SIGINT', () => {
-        console.log('🛑 [SIGINT] Bot is being stopped manually.');
-        process.exit(0);
-    });
+    };
+
+    process.on('SIGTERM', () => cleanup('SIGTERM'));
+    process.on('SIGINT', () => cleanup('SIGINT'));
 }
 
 // ─── Entry Point ───
 
 export function startMonitoring(bot: Bot) {
-    console.log("👀 Starting Blockchain Monitors (v4.2 — Memory Priority)...");
+    console.log("👀 Starting Blockchain Monitors (v5.0 — Alchemy Filtered Subscriptions)...");
 
     startMemoryMonitor();
     setupShutdownHandlers();
+
+    const trackedCount = getTrackedAddresses().length;
+    console.log(`📋 Tracking ${trackedCount} wallet(s) across ${chains.length} chain(s)`);
 
     chains.forEach(chain => {
         if (chain.rpcUrls.length === 0) {
@@ -428,15 +499,17 @@ export function startMonitoring(bot: Bot) {
             return;
         }
 
-        const mode = chain.wsUrl ? 'WebSocket + Polling fallback' : 'Polling only';
-        console.log(`✅ [${chain.name}] ${mode} (${chain.rpcUrls.length} RPCs, ${chain.pollInterval / 1000}s poll)`);
-
-        // Start WebSocket if URL provided (primary, faster)
-        if (chain.wsUrl) {
-            startWebSocketListener(chain, bot);
+        if (chain.alchemyWsUrl) {
+            console.log(`✅ [${chain.name}] Alchemy filtered subscription + polling fallback`);
+            startAlchemyListener(chain, bot);
+        } else {
+            console.log(`⚠️ [${chain.name}] No Alchemy WS — using polling only`);
         }
 
-        // Always start polling as fallback (or primary if no WS)
-        startPollingListener(chain, bot);
+        // Always start polling as fallback
+        startPollingFallback(chain, bot);
     });
+
+    // Watch for wallet changes and resubscribe
+    startWalletChangeWatcher(bot);
 }

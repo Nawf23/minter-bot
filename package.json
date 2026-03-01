@@ -9,10 +9,12 @@
     "dev": "nodemon --watch 'src/**/*.ts' --exec 'ts-node' src/bot.ts"
   },
   "dependencies": {
+    "@types/ws": "^8.18.1",
     "dotenv": "^16.4.1",
     "ethers": "^6.11.1",
     "grammy": "^1.21.1",
-    "lowdb": "^7.0.0"
+    "lowdb": "^7.0.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.19",
