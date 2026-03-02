@@ -402,11 +402,47 @@ async function waitForConfirmation(
             const label = keyName ? `"${keyName}"` : 'Key';
             console.log(`[${chainName}]   ❌ [${label}] Reverted on-chain: ${hash}`);
 
+            // Try to decode the revert reason
+            let revertReason = 'Unknown';
+            try {
+                const tx = await provider.getTransaction(hash);
+                if (tx) {
+                    const callResult = await provider.call({
+                        to: tx.to,
+                        from: tx.from,
+                        data: tx.data,
+                        value: tx.value,
+                        blockTag: receipt.blockNumber,
+                    });
+                }
+            } catch (callErr: any) {
+                const errMsg = callErr.message || '';
+                const dataMatch = errMsg.match(/data="(0x[a-fA-F0-9]+)"/);
+                if (dataMatch) {
+                    revertReason = decodeRevertReason(dataMatch[1]);
+                } else if (errMsg.includes('execution reverted')) {
+                    // Try to extract reason from the error message directly
+                    const reasonMatch = errMsg.match(/reason="([^"]+)"/);
+                    revertReason = reasonMatch ? reasonMatch[1] : 'Contract rejected';
+                } else {
+                    revertReason = 'Contract rejected';
+                }
+            }
+
+            const gasUsed = receipt.gasUsed.toString();
+            const gasPrice = ethers.formatUnits(receipt.gasPrice || 0n, 'gwei');
+            const gasCostWei = receipt.gasUsed * (receipt.gasPrice || 0n);
+            const gasCostEth = ethers.formatEther(gasCostWei);
+
+            console.log(`[${chainName}]   ❌ [${label}] Revert reason: ${revertReason}`);
+
             await bot.api.sendMessage(chatId,
-                `❌ *Transaction Reverted on-chain*\n\n` +
+                `❌ *Mint Reverted On-Chain*\n\n` +
                 `Key: ${label} (\`${address}\`)\n` +
+                `Reason: *${revertReason}*\n` +
+                `Gas wasted: ${gasCostEth} ETH\n` +
                 `Hash: [View on Explorer](${getExplorerUrl(chainName, hash)})\n\n` +
-                `_Your gas was spent but the contract rejected the execution._`,
+                `_${gasUsed} gas @ ${gasPrice} gwei_`,
                 { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
             ).catch(() => { });
         }

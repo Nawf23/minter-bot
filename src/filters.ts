@@ -50,6 +50,7 @@ const MINT_FUNCTION_WHITELIST = [
     '0x26bf076a', // mintPublic(address,address,address,uint256) - SeaDrop v1
     '0x2e69ed7f', // mintAllowList(address,address,address,uint256,...) - SeaDrop
     '0x6ab93230', // mintAllowedTokenHolder(address,address,address,...) - SeaDrop
+    '0x2d9fb478', // mintSeaDrop(address,uint256) - SeaDrop v2
 ];
 
 /**
