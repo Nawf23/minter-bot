@@ -1,4 +1,4 @@
-// @ts-nocheck v5 — Alchemy filtered pending tx subscriptions + lightweight fallback
+// @ts-nocheck v5.1 — CU-optimized Alchemy subscriptions
 import { ethers } from 'ethers';
 import WebSocket from 'ws';
 import { config } from './config';
@@ -13,9 +13,9 @@ import { getSharedProvider } from './rpc_utils';
 interface ChainConfig {
     name: string;
     rpcUrls: string[];
-    alchemyWsUrl: string;    // Alchemy WebSocket URL for filtered pending txs
-    wsUrl: string;            // Generic WebSocket URL (fallback)
-    pollInterval: number;     // ms between fallback polls
+    alchemyWsUrl: string;
+    wsUrl: string;
+    pollInterval: number;
 }
 
 const chains: ChainConfig[] = [
@@ -28,7 +28,7 @@ const chains: ChainConfig[] = [
         ].filter(Boolean),
         alchemyWsUrl: config.alchemyWsEth,
         wsUrl: config.wsUrl,
-        pollInterval: 30000,  // 30s fallback (Alchemy handles real-time)
+        pollInterval: 60000,  // 60s — only as safety net
     },
     {
         name: 'BASE',
@@ -39,7 +39,7 @@ const chains: ChainConfig[] = [
         ].filter(Boolean),
         alchemyWsUrl: config.alchemyWsBase,
         wsUrl: config.wsUrlBase,
-        pollInterval: 30000,
+        pollInterval: 60000,
     },
     {
         name: 'POLY',
@@ -50,7 +50,7 @@ const chains: ChainConfig[] = [
         ].filter(Boolean),
         alchemyWsUrl: config.alchemyWsPoly,
         wsUrl: config.wsUrlPoly,
-        pollInterval: 30000,
+        pollInterval: 60000,
     }
 ];
 
@@ -64,9 +64,49 @@ const ADMIN_ID = (process.env.ADMIN_USER_ID || '').trim();
 const BATCH_SIZE = 5;
 const BATCH_DELAY_MS = 200;
 
-// Track active Alchemy subscriptions for resubscription
+// Alchemy connections
 const alchemyConnections: Record<string, WebSocket | null> = {};
+const alchemyHealthy: Record<string, boolean> = {};  // Track WS health to skip polling
 let lastKnownDataVersion = -1;
+
+// ─── CU Tracking ───
+let cuEstimate = 0;
+const CU_HASH_NOTIFICATION = 50;   // hashesOnly notification
+const CU_GET_TX = 17;              // eth_getTransactionByHash
+const CU_GET_BLOCK = 16;           // eth_getBlockByNumber
+const CU_GET_BLOCK_NUM = 10;       // eth_blockNumber
+
+// ─── Per-Wallet Cooldown (suppress spammy non-mint wallets) ───
+const walletMissStreak: Record<string, number> = {};  // address -> consecutive non-mint count
+const walletCooldownUntil: Record<string, number> = {};  // address -> timestamp
+const COOLDOWN_THRESHOLD = 8;     // After 8 consecutive non-mint txs, cooldown
+const COOLDOWN_DURATION = 300000;  // 5 minute cooldown
+
+function isWalletCoolingDown(address: string): boolean {
+    const until = walletCooldownUntil[address];
+    if (!until) return false;
+    if (Date.now() > until) {
+        // Cooldown expired, reset
+        delete walletCooldownUntil[address];
+        walletMissStreak[address] = 0;
+        return false;
+    }
+    return true;
+}
+
+function recordWalletResult(address: string, isMint: boolean) {
+    if (isMint) {
+        // Reset on mint
+        walletMissStreak[address] = 0;
+        delete walletCooldownUntil[address];
+    } else {
+        walletMissStreak[address] = (walletMissStreak[address] || 0) + 1;
+        if (walletMissStreak[address] >= COOLDOWN_THRESHOLD) {
+            walletCooldownUntil[address] = Date.now() + COOLDOWN_DURATION;
+            console.log(`  💤 Wallet ${address.substring(0, 10)}... cooldown (${COOLDOWN_THRESHOLD} non-mint txs → pausing 5min)`);
+        }
+    }
+}
 
 // ─── Wallet Map ───
 
@@ -163,7 +203,7 @@ async function processMintBatches(
     }
 }
 
-// ─── Process a Single Transaction ───
+// ─── Process a Full Transaction ───
 
 async function processTx(chain: ChainConfig, tx: any, bot: Bot, source: string) {
     if (!tx || !tx.hash || !tx.from) return;
@@ -176,30 +216,25 @@ async function processTx(chain: ChainConfig, tx: any, bot: Bot, source: string) 
     const trackers = walletMap.get(fromAddr);
     if (!trackers) return;
 
-    console.log(`[${chain.name}] 🎯 ${source} TX from tracked wallet ${fromAddr.substring(0, 10)}... (${tx.hash.substring(0, 14)}...)`);
-
-    // Skip if no calldata
-    if (!tx.input || tx.input === '0x') {
-        processedTxs.add(txKey);
-        return;
-    }
-    if (!tx.to) {
-        processedTxs.add(txKey);
-        return;
-    }
-
-    // Use tx.input (Alchemy format) or tx.data (ethers format)
+    // Skip if no calldata or no target
     const txData = tx.input || tx.data || '';
+    if (!txData || txData === '0x' || !tx.to) {
+        processedTxs.add(txKey);
+        recordWalletResult(fromAddr, false);
+        return;
+    }
 
     if (!isLikelyNFTMint(txData)) {
         processedTxs.add(txKey);
+        recordWalletResult(fromAddr, false);
         return;
     }
 
-    console.log(`  ✅ NFT Mint detected via ${source}! ${trackers.length} user(s)`);
+    console.log(`[${chain.name}] ✅ MINT detected via ${source}! ${trackers.length} user(s) — ${tx.hash.substring(0, 14)}...`);
     processedTxs.add(txKey);
+    recordWalletResult(fromAddr, true);
 
-    // Normalize tx for attemptMintAllKeys (needs ethers TransactionResponse shape)
+    // Normalize tx
     const normalizedTx = {
         hash: tx.hash,
         from: tx.from,
@@ -266,7 +301,7 @@ async function processTx(chain: ChainConfig, tx: any, bot: Bot, source: string) 
     }
 }
 
-// ─── Alchemy Filtered Pending TX Subscription ───
+// ─── Alchemy Filtered Pending TX Subscription (hashesOnly mode) ───
 
 function startAlchemyListener(chain: ChainConfig, bot: Bot) {
     if (!chain.alchemyWsUrl) return;
@@ -277,11 +312,15 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
         return;
     }
 
-    console.log(`  ⚡ [${chain.name}] Starting Alchemy filtered subscription (${addresses.length} wallets)`);
+    console.log(`  ⚡ [${chain.name}] Starting Alchemy subscription — hashesOnly mode (${addresses.length} wallets)`);
+
+    // Derive HTTP URL from WS URL for fetching tx details
+    const alchemyHttpUrl = chain.alchemyWsUrl
+        .replace('wss://', 'https://')
+        .replace('ws://', 'http://');
 
     const connect = () => {
         try {
-            // Clean up old connection
             if (alchemyConnections[chain.name]) {
                 try { alchemyConnections[chain.name]!.close(); } catch { }
             }
@@ -291,8 +330,9 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
 
             ws.on('open', () => {
                 console.log(`[${chain.name}] ✅ Alchemy WebSocket connected`);
+                alchemyHealthy[chain.name] = true;
 
-                // Subscribe to pending transactions from tracked wallets only
+                // Subscribe with hashesOnly: true (much cheaper per notification)
                 const subRequest = {
                     jsonrpc: '2.0',
                     id: 1,
@@ -302,13 +342,13 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
                         {
                             fromAddress: addresses,
                             toAddress: [],
-                            hashesOnly: false,  // Get full tx data
+                            hashesOnly: true,  // ← KEY CHANGE: only hashes, saves ~66% CU
                         }
                     ]
                 };
 
                 ws.send(JSON.stringify(subRequest));
-                console.log(`[${chain.name}] 📡 Subscribed to pending txs from ${addresses.length} wallets`);
+                console.log(`[${chain.name}] 📡 Subscribed (hashesOnly) to ${addresses.length} wallets`);
             });
 
             ws.on('message', async (data: Buffer) => {
@@ -321,11 +361,42 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
                         return;
                     }
 
-                    // Pending transaction notification
+                    // Pending tx hash notification
                     if (msg.method === 'eth_subscription' && msg.params?.result) {
-                        const tx = msg.params.result;
-                        console.log(`[${chain.name}] ⚡ MEMPOOL: Pending tx from ${tx.from?.substring(0, 10)}...`);
-                        await processTx(chain, tx, bot, 'MEMPOOL');
+                        const txHash = msg.params.result;
+                        cuEstimate += CU_HASH_NOTIFICATION;
+
+                        // Skip if already processed
+                        if (processedTxs.has(txHash)) return;
+
+                        // Fetch full tx details via Alchemy HTTP (costs 17 CU)
+                        try {
+                            const provider = getSharedProvider(alchemyHttpUrl);
+                            const tx = await provider.getTransaction(txHash);
+                            cuEstimate += CU_GET_TX;
+
+                            if (!tx || !tx.from) return;
+
+                            // Check wallet cooldown BEFORE processing
+                            const fromAddr = tx.from.toLowerCase();
+                            if (isWalletCoolingDown(fromAddr)) return;
+
+                            console.log(`[${chain.name}] ⚡ MEMPOOL: ${fromAddr.substring(0, 10)}... (${txHash.substring(0, 14)}...)`);
+
+                            await processTx(chain, {
+                                hash: tx.hash,
+                                from: tx.from,
+                                to: tx.to,
+                                input: tx.data,
+                                value: tx.value.toString(),
+                            }, bot, 'MEMPOOL');
+                        } catch (fetchErr: any) {
+                            // TX might have been dropped from mempool, that's OK
+                            if (!fetchErr.message?.includes('not found')) {
+                                console.error(`[${chain.name}] Fetch error for ${txHash.substring(0, 14)}...: ${fetchErr.message}`);
+                            }
+                        }
+
                         cleanupProcessedTxs();
                     }
                 } catch (err: any) {
@@ -335,17 +406,20 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
 
             ws.on('error', (err: any) => {
                 console.error(`[${chain.name}] ⚠️ Alchemy WS error: ${err.message}`);
+                alchemyHealthy[chain.name] = false;
             });
 
             ws.on('close', () => {
                 console.log(`[${chain.name}] 🔌 Alchemy WS disconnected, reconnecting in 5s...`);
                 alchemyConnections[chain.name] = null;
+                alchemyHealthy[chain.name] = false;
                 setTimeout(connect, 5000);
             });
 
         } catch (err: any) {
             console.error(`[${chain.name}] ❌ Alchemy WS connection failed: ${err.message}`);
             alchemyConnections[chain.name] = null;
+            alchemyHealthy[chain.name] = false;
             setTimeout(connect, 10000);
         }
     };
@@ -363,37 +437,45 @@ function startWalletChangeWatcher(bot: Bot) {
             lastVersion = store.dataVersion;
             console.log('🔄 Wallet list changed, resubscribing Alchemy listeners...');
 
-            // Rebuild cached wallet map
             cachedWalletMap = null;
             lastKnownDataVersion = -1;
 
-            // Reconnect all Alchemy listeners with updated addresses
             for (const chain of chains) {
                 if (chain.alchemyWsUrl) {
                     startAlchemyListener(chain, bot);
                 }
             }
         }
-    }, 2000); // Check every 2 seconds
+    }, 2000);
 }
 
 // ─── Lightweight Polling Fallback ───
-// Only activates for chains WITHOUT Alchemy, or as a safety net
-// Uses getBlock(blockNum, true) but polls much less frequently (every 30s)
+// ONLY runs when Alchemy WS is disconnected, or every 60s as a safety net
+// Uses FREE public RPCs (not Alchemy)
 
 function startPollingFallback(chain: ChainConfig, bot: Bot) {
-    const interval = chain.alchemyWsUrl ? chain.pollInterval : 12000; // Faster if no Alchemy
     const mode = chain.alchemyWsUrl ? 'safety-net' : 'primary';
+    const interval = chain.alchemyWsUrl ? chain.pollInterval : 12000;
 
-    console.log(`  📡 [${chain.name}] Polling fallback (${mode}, every ${interval / 1000}s)`);
+    // Filter out Alchemy URLs from polling — only use free RPCs
+    const freeRpcUrls = chain.rpcUrls.filter(url => !url.includes('alchemy.com'));
+    if (freeRpcUrls.length === 0) {
+        console.log(`  ⚠️ [${chain.name}] No free RPCs for polling, using all RPCs`);
+        freeRpcUrls.push(...chain.rpcUrls);
+    }
+
+    console.log(`  📡 [${chain.name}] Polling fallback (${mode}, every ${interval / 1000}s, ${freeRpcUrls.length} free RPCs)`);
 
     setInterval(async () => {
         try {
+            // Skip polling if Alchemy WS is healthy (saves CU on free RPCs too)
+            if (chain.alchemyWsUrl && alchemyHealthy[chain.name]) return;
+
             const walletMap = getWalletMap();
             if (walletMap.size === 0) return;
 
             const currentBlock = await rpcCallWithRetry(
-                chain.rpcUrls,
+                freeRpcUrls,
                 (provider) => provider.getBlockNumber(),
                 chain.name
             );
@@ -401,11 +483,10 @@ function startPollingFallback(chain: ChainConfig, bot: Bot) {
             const lastBlock = lastCheckedBlock[chain.name] || currentBlock - 1;
             if (currentBlock <= lastBlock) return;
 
-            // Only check latest block (not gap-filling — Alchemy handles that)
             lastCheckedBlock[chain.name] = currentBlock;
 
             const block = await rpcCallWithRetry(
-                chain.rpcUrls,
+                freeRpcUrls,
                 (provider) => provider.getBlock(currentBlock, true),
                 chain.name
             );
@@ -416,6 +497,7 @@ function startPollingFallback(chain: ChainConfig, bot: Bot) {
             for (const tx of block.prefetchedTransactions) {
                 const fromAddr = tx.from.toLowerCase();
                 if (!walletMap.has(fromAddr)) continue;
+                if (isWalletCoolingDown(fromAddr)) continue;
                 found++;
                 await processTx(chain, {
                     hash: tx.hash,
@@ -439,22 +521,33 @@ function startPollingFallback(chain: ChainConfig, bot: Bot) {
     }, interval);
 }
 
-// ─── Memory Monitor ───
+// ─── Memory & CU Monitor ───
 
-function startMemoryMonitor() {
+function startMonitors() {
     setInterval(() => {
         const used = process.memoryUsage();
         const heapUsed = Math.round(used.heapUsed / 1024 / 1024);
         const rss = Math.round(used.rss / 1024 / 1024);
-
         const RAILWAY_LIMIT_MB = 2048;
         const usagePercent = (rss / RAILWAY_LIMIT_MB) * 100;
 
-        let status = '🟢 GOOD';
-        if (usagePercent > 85) status = '🔴 CRITICAL';
-        else if (usagePercent > 70) status = '🟡 HIGH';
+        let memStatus = '🟢';
+        if (usagePercent > 85) memStatus = '🔴';
+        else if (usagePercent > 70) memStatus = '🟡';
 
-        console.log(`📊 [${status}] Memory: Heap ${heapUsed}MB | RSS ${rss}MB (${Math.round(usagePercent)}%) | ${chains.length} chains`);
+        // Alchemy WS status
+        const wsStatus = chains.map(c => {
+            if (!c.alchemyWsUrl) return `${c.name}:OFF`;
+            return `${c.name}:${alchemyHealthy[c.name] ? '🟢' : '🔴'}`;
+        }).join(' ');
+
+        // Cooldown status
+        const cooledDown = Object.keys(walletCooldownUntil).length;
+
+        console.log(
+            `📊 [${memStatus}] Heap ${heapUsed}MB | RSS ${rss}MB (${Math.round(usagePercent)}%) | ` +
+            `WS: ${wsStatus} | Est CU: ~${Math.round(cuEstimate / 1000)}K | Cooled: ${cooledDown} wallet(s)`
+        );
 
         if (usagePercent > 92) {
             console.warn('🚨 MEMORY CRITICAL! Triggering emergency cleanup...');
@@ -468,7 +561,6 @@ function startMemoryMonitor() {
 function setupShutdownHandlers() {
     const cleanup = (signal: string) => {
         console.log(`🛑 [${signal}] Shutting down...`);
-        // Close all Alchemy WebSocket connections
         for (const [name, ws] of Object.entries(alchemyConnections)) {
             if (ws) {
                 try { ws.close(); } catch { }
@@ -485,13 +577,14 @@ function setupShutdownHandlers() {
 // ─── Entry Point ───
 
 export function startMonitoring(bot: Bot) {
-    console.log("👀 Starting Blockchain Monitors (v5.0 — Alchemy Filtered Subscriptions)...");
+    console.log("👀 Starting Blockchain Monitors (v5.1 — CU Optimized)...");
 
-    startMemoryMonitor();
+    startMonitors();
     setupShutdownHandlers();
 
     const trackedCount = getTrackedAddresses().length;
     console.log(`📋 Tracking ${trackedCount} wallet(s) across ${chains.length} chain(s)`);
+    console.log(`⚡ Optimizations: hashesOnly mode | wallet cooldown (${COOLDOWN_THRESHOLD} miss → ${COOLDOWN_DURATION / 1000}s pause) | smart polling`);
 
     chains.forEach(chain => {
         if (chain.rpcUrls.length === 0) {
@@ -500,16 +593,14 @@ export function startMonitoring(bot: Bot) {
         }
 
         if (chain.alchemyWsUrl) {
-            console.log(`✅ [${chain.name}] Alchemy filtered subscription + polling fallback`);
+            console.log(`✅ [${chain.name}] Alchemy hashesOnly + smart polling`);
             startAlchemyListener(chain, bot);
         } else {
             console.log(`⚠️ [${chain.name}] No Alchemy WS — using polling only`);
         }
 
-        // Always start polling as fallback
         startPollingFallback(chain, bot);
     });
 
-    // Watch for wallet changes and resubscribe
     startWalletChangeWatcher(bot);
 }
