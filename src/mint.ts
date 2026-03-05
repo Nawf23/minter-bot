@@ -84,6 +84,16 @@ function decodeRevertReason(data: string): string {
         return 'Max per wallet reached (SeaDrop)';
     }
 
+    // SeaDrop: NotActive (0x13da22f2)
+    if (data.startsWith('0x13da22f2')) {
+        return 'Mint is not active yet (SeaDrop)';
+    }
+
+    // SeaDrop: InvalidSignature (0xd855c4f4)
+    if (data.startsWith('0xd855c4f4')) {
+        return 'Invalid signature - signed mints cannot be copied';
+    }
+
     // Default to showing just the selector if unknown
     return `Contract rejected (${data.substring(0, 10)})`;
 }

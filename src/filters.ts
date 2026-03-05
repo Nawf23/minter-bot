@@ -45,12 +45,16 @@ const MINT_FUNCTION_WHITELIST = [
     '0x40c10f19', // mint(address,uint256) - common for ERC721
     '0x161ac21f', // claim(address,address,address,uint256) - thirdweb/Zora claim (specific, safe)
     '0x94b91883', // mintBatch(address,uint256[],uint256[],bytes)
-    // SeaDrop mint functions (can have long calldata with signatures/proofs)
-    '0x4b61cd6f', // mintSigned(address,address,address,uint256,...) - SeaDrop
+    // SeaDrop mint functions (can have long calldata)
     '0x26bf076a', // mintPublic(address,address,address,uint256) - SeaDrop v1
+    '0x2d9fb478', // mintSeaDrop(address,uint256) - SeaDrop v2
+];
+
+// Functions that LOOK like mints but have signatures/proofs that cannot be copied by another wallet
+const SIGNED_MINT_BLACKLIST = [
+    '0x4b61cd6f', // mintSigned(address,address,address,uint256,...) - SeaDrop
     '0x2e69ed7f', // mintAllowList(address,address,address,uint256,...) - SeaDrop
     '0x6ab93230', // mintAllowedTokenHolder(address,address,address,...) - SeaDrop
-    '0x2d9fb478', // mintSeaDrop(address,uint256) - SeaDrop v2
 ];
 
 /**
@@ -66,6 +70,12 @@ export function isLikelyNFTMint(txData: string): boolean {
     // Layer 1: Blacklist check - reject known DeFi/Token operations
     if (TOKEN_FUNCTION_BLACKLIST.includes(functionSig)) {
         console.log(`  🚫 Filtered: DeFi/Swap interaction (${functionSig})`);
+        return false;
+    }
+
+    // Layer 1.5: Signed mint check - reject mints with signatures/proofs that can't be copied
+    if (SIGNED_MINT_BLACKLIST.includes(functionSig)) {
+        console.log(`  🚫 Filtered: Signed/Allowlist mint (${functionSig}) - cannot copy`);
         return false;
     }
 
