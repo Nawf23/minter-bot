@@ -76,37 +76,7 @@ const CU_GET_TX = 17;              // eth_getTransactionByHash
 const CU_GET_BLOCK = 16;           // eth_getBlockByNumber
 const CU_GET_BLOCK_NUM = 10;       // eth_blockNumber
 
-// ─── Per-Wallet Cooldown (suppress spammy non-mint wallets) ───
-const walletMissStreak: Record<string, number> = {};  // address -> consecutive non-mint count
-const walletCooldownUntil: Record<string, number> = {};  // address -> timestamp
-const COOLDOWN_THRESHOLD = 8;     // After 8 consecutive non-mint txs, cooldown
-const COOLDOWN_DURATION = 300000;  // 5 minute cooldown
-
-function isWalletCoolingDown(address: string): boolean {
-    const until = walletCooldownUntil[address];
-    if (!until) return false;
-    if (Date.now() > until) {
-        // Cooldown expired, reset
-        delete walletCooldownUntil[address];
-        walletMissStreak[address] = 0;
-        return false;
-    }
-    return true;
-}
-
-function recordWalletResult(address: string, isMint: boolean) {
-    if (isMint) {
-        // Reset on mint
-        walletMissStreak[address] = 0;
-        delete walletCooldownUntil[address];
-    } else {
-        walletMissStreak[address] = (walletMissStreak[address] || 0) + 1;
-        if (walletMissStreak[address] >= COOLDOWN_THRESHOLD) {
-            walletCooldownUntil[address] = Date.now() + COOLDOWN_DURATION;
-            console.log(`  💤 Wallet ${address.substring(0, 10)}... cooldown (${COOLDOWN_THRESHOLD} non-mint txs → pausing 5min)`);
-        }
-    }
-}
+// ─── No Cooldowns (Full Mempool Stream) ───
 
 // ─── Wallet Map ───
 
@@ -220,19 +190,16 @@ async function processTx(chain: ChainConfig, tx: any, bot: Bot, source: string) 
     const txData = tx.input || tx.data || '';
     if (!txData || txData === '0x' || !tx.to) {
         processedTxs.add(txKey);
-        recordWalletResult(fromAddr, false);
         return;
     }
 
     if (!isLikelyNFTMint(txData)) {
         processedTxs.add(txKey);
-        recordWalletResult(fromAddr, false);
         return;
     }
 
     console.log(`[${chain.name}] ✅ MINT detected via ${source}! ${trackers.length} user(s) — ${tx.hash.substring(0, 14)}...`);
     processedTxs.add(txKey);
-    recordWalletResult(fromAddr, true);
 
     // Normalize tx
     const normalizedTx = {
@@ -375,9 +342,7 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
 
                         if (!tx.from) return;
 
-                        // Check wallet cooldown BEFORE processing
                         const fromAddr = tx.from.toLowerCase();
-                        if (isWalletCoolingDown(fromAddr)) return;
 
                         console.log(`[${chain.name}] ⚡ MEMPOOL: ${fromAddr.substring(0, 10)}... (${tx.hash.substring(0, 14)}...)`);
 
@@ -533,12 +498,9 @@ function startMonitors() {
             return `${c.name}:${alchemyHealthy[c.name] ? '🟢' : '🔴'}`;
         }).join(' ');
 
-        // Cooldown status
-        const cooledDown = Object.keys(walletCooldownUntil).length;
-
         console.log(
             `📊 [${memStatus}] Heap ${heapUsed}MB | RSS ${rss}MB (${Math.round(usagePercent)}%) | ` +
-            `WS: ${wsStatus} | Est CU: ~${Math.round(cuEstimate / 1000)}K | Cooled: ${cooledDown} wallet(s)`
+            `WS: ${wsStatus} | Est CU: ~${Math.round(cuEstimate / 1000)}K`
         );
 
         if (usagePercent > 92) {
