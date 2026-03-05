@@ -302,7 +302,7 @@ function resubscribeAlchemy(chain: ChainConfig) {
             {
                 fromAddress: addresses,
                 toAddress: [],
-                hashesOnly: false,
+                hashesOnly: true,
             }
         ]
     };
@@ -349,33 +349,39 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
                         return; // Successfully unsubscribed from old filter
                     }
 
-                    // Pending tx full object notification
+                    // Pending tx hash notification (hashesOnly mode)
                     if (msg.method === 'eth_subscription' && msg.params?.result) {
-                        const tx = msg.params.result;
+                        const txHash = msg.params.result;
+                        cuEstimate += CU_HASH_NOTIFICATION;
 
-                        // Fallback cost of 150 CU for full tx notification
-                        cuEstimate += 150;
-
-                        if (!tx || typeof tx === 'string' || !tx.hash) return;
+                        if (typeof txHash !== 'string' || !txHash.startsWith('0x')) return;
 
                         // Skip if already processed
-                        if (processedTxs.has(tx.hash)) return;
+                        if (processedTxs.has(txHash)) return;
 
-                        if (!tx.from) return;
+                        // Fetch full tx from Alchemy HTTP (fast, has pending pool)
+                        try {
+                            cuEstimate += CU_GET_TX;
+                            const provider = getSharedProvider(chain.rpcUrls[0]);
+                            const tx = await provider.getTransaction(txHash);
+                            if (!tx || !tx.from) return;
 
-                        const fromAddr = tx.from.toLowerCase();
+                            const fromAddr = tx.from.toLowerCase();
 
-                        console.log(`[${chain.name}] ⚡ MEMPOOL: ${fromAddr.substring(0, 10)}... (${tx.hash.substring(0, 14)}...)`);
+                            console.log(`[${chain.name}] ⚡ MEMPOOL: ${fromAddr.substring(0, 10)}... (${txHash.substring(0, 14)}...)`);
 
-                        await processTx(chain, {
-                            hash: tx.hash,
-                            from: tx.from,
-                            to: tx.to,
-                            input: tx.input,
-                            value: BigInt(tx.value || 0).toString(),
-                        }, bot, 'MEMPOOL');
+                            await processTx(chain, {
+                                hash: tx.hash,
+                                from: tx.from,
+                                to: tx.to,
+                                input: tx.data,
+                                value: tx.value.toString(),
+                            }, bot, 'MEMPOOL');
 
-                        cleanupProcessedTxs();
+                            cleanupProcessedTxs();
+                        } catch (fetchErr: any) {
+                            // Silently skip fetch failures — polling will catch it
+                        }
                     }
                 } catch (err: any) {
                     console.error(`[${chain.name}] Alchemy WS parse error: ${err.message}`);
