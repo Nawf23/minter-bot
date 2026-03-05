@@ -538,7 +538,7 @@ export function startMonitoring(bot: Bot) {
 
     const trackedCount = getTrackedAddresses().length;
     console.log(`📋 Tracking ${trackedCount} wallet(s) across ${chains.length} chain(s)`);
-    console.log(`⚡ Optimizations: hashesOnly mode | wallet cooldown (${COOLDOWN_THRESHOLD} miss → ${COOLDOWN_DURATION / 1000}s pause) | smart polling`);
+    console.log(`⚡ Optimizations: smart polling | full mempool tx stream`);
 
     chains.forEach(chain => {
         if (chain.rpcUrls.length === 0) {
