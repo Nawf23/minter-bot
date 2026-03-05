@@ -342,13 +342,13 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
                         {
                             fromAddress: addresses,
                             toAddress: [],
-                            hashesOnly: true,  // ← KEY CHANGE: only hashes, saves ~66% CU
+                            hashesOnly: false,  // Reverted to false: 1) no missing tx 2) faster execution without HTTP roundtrip
                         }
                     ]
                 };
 
                 ws.send(JSON.stringify(subRequest));
-                console.log(`[${chain.name}] 📡 Subscribed (hashesOnly) to ${addresses.length} wallets`);
+                console.log(`[${chain.name}] 📡 Subscribed to ${addresses.length} wallets`);
             });
 
             ws.on('message', async (data: Buffer) => {
@@ -361,41 +361,33 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
                         return;
                     }
 
-                    // Pending tx hash notification
+                    // Pending tx full object notification
                     if (msg.method === 'eth_subscription' && msg.params?.result) {
-                        const txHash = msg.params.result;
-                        cuEstimate += CU_HASH_NOTIFICATION;
+                        const tx = msg.params.result;
+
+                        // Fallback cost of 150 CU for full tx notification
+                        cuEstimate += 150;
+
+                        if (!tx || typeof tx === 'string' || !tx.hash) return;
 
                         // Skip if already processed
-                        if (processedTxs.has(txHash)) return;
+                        if (processedTxs.has(tx.hash)) return;
 
-                        // Fetch full tx details via Alchemy HTTP (costs 17 CU)
-                        try {
-                            const provider = getSharedProvider(alchemyHttpUrl);
-                            const tx = await provider.getTransaction(txHash);
-                            cuEstimate += CU_GET_TX;
+                        if (!tx.from) return;
 
-                            if (!tx || !tx.from) return;
+                        // Check wallet cooldown BEFORE processing
+                        const fromAddr = tx.from.toLowerCase();
+                        if (isWalletCoolingDown(fromAddr)) return;
 
-                            // Check wallet cooldown BEFORE processing
-                            const fromAddr = tx.from.toLowerCase();
-                            if (isWalletCoolingDown(fromAddr)) return;
+                        console.log(`[${chain.name}] ⚡ MEMPOOL: ${fromAddr.substring(0, 10)}... (${tx.hash.substring(0, 14)}...)`);
 
-                            console.log(`[${chain.name}] ⚡ MEMPOOL: ${fromAddr.substring(0, 10)}... (${txHash.substring(0, 14)}...)`);
-
-                            await processTx(chain, {
-                                hash: tx.hash,
-                                from: tx.from,
-                                to: tx.to,
-                                input: tx.data,
-                                value: tx.value.toString(),
-                            }, bot, 'MEMPOOL');
-                        } catch (fetchErr: any) {
-                            // TX might have been dropped from mempool, that's OK
-                            if (!fetchErr.message?.includes('not found')) {
-                                console.error(`[${chain.name}] Fetch error for ${txHash.substring(0, 14)}...: ${fetchErr.message}`);
-                            }
-                        }
+                        await processTx(chain, {
+                            hash: tx.hash,
+                            from: tx.from,
+                            to: tx.to,
+                            input: tx.input,
+                            value: BigInt(tx.value || 0).toString(),
+                        }, bot, 'MEMPOOL');
 
                         cleanupProcessedTxs();
                     }
