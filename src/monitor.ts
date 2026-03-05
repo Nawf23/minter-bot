@@ -465,32 +465,44 @@ function startPollingFallback(chain: ChainConfig, bot: Bot) {
             const lastBlock = lastCheckedBlock[chain.name] || currentBlock - 1;
             if (currentBlock <= lastBlock) return;
 
+            // Scan ALL blocks since last check (cap at 5 to avoid RPC abuse)
+            const MAX_BLOCKS_PER_POLL = 5;
+            const startBlock = Math.max(lastBlock + 1, currentBlock - MAX_BLOCKS_PER_POLL + 1);
             lastCheckedBlock[chain.name] = currentBlock;
 
-            const block = await rpcCallWithRetry(
-                freeRpcUrls,
-                (provider) => provider.getBlock(currentBlock, true),
-                chain.name
-            );
+            let totalFound = 0;
+            for (let blockNum = startBlock; blockNum <= currentBlock; blockNum++) {
+                try {
+                    const block = await rpcCallWithRetry(
+                        freeRpcUrls,
+                        (provider) => provider.getBlock(blockNum, true),
+                        chain.name
+                    );
 
-            if (!block || !block.prefetchedTransactions) return;
+                    if (!block || !block.prefetchedTransactions) continue;
 
-            let found = 0;
-            for (const tx of block.prefetchedTransactions) {
-                const fromAddr = tx.from.toLowerCase();
-                if (!walletMap.has(fromAddr)) continue;
-                found++;
-                await processTx(chain, {
-                    hash: tx.hash,
-                    from: tx.from,
-                    to: tx.to,
-                    input: tx.data,
-                    value: tx.value.toString(),
-                }, bot, 'POLL');
+                    for (const tx of block.prefetchedTransactions) {
+                        const fromAddr = tx.from.toLowerCase();
+                        if (!walletMap.has(fromAddr)) continue;
+                        totalFound++;
+                        await processTx(chain, {
+                            hash: tx.hash,
+                            from: tx.from,
+                            to: tx.to,
+                            input: tx.data,
+                            value: tx.value.toString(),
+                        }, bot, 'POLL');
+                    }
+                } catch (blockErr: any) {
+                    // Skip individual block errors, continue with next
+                    if (!blockErr.message?.includes('429') && !blockErr.message?.includes('rate limit')) {
+                        console.error(`[${chain.name}] Poll block ${blockNum} error: ${blockErr.message}`);
+                    }
+                }
             }
 
-            if (found > 0) {
-                console.log(`[${chain.name}] 📡 Poll caught ${found} tracked tx(s) in block ${currentBlock}`);
+            if (totalFound > 0) {
+                console.log(`[${chain.name}] 📡 Poll caught ${totalFound} tracked tx(s) in blocks ${startBlock}-${currentBlock}`);
             }
 
             cleanupProcessedTxs();
