@@ -450,8 +450,8 @@ function startPollingFallback(chain: ChainConfig, bot: Bot) {
 
     setInterval(async () => {
         try {
-            // Skip polling if Alchemy WS is healthy (saves CU on free RPCs too)
-            if (chain.alchemyWsUrl && alchemyHealthy[chain.name]) return;
+            // ALWAYS poll as safety net — WS can silently drop transactions.
+            // processedTxs set prevents duplicate processing.
 
             const walletMap = getWalletMap();
             if (walletMap.size === 0) return;
@@ -479,7 +479,6 @@ function startPollingFallback(chain: ChainConfig, bot: Bot) {
             for (const tx of block.prefetchedTransactions) {
                 const fromAddr = tx.from.toLowerCase();
                 if (!walletMap.has(fromAddr)) continue;
-                if (isWalletCoolingDown(fromAddr)) continue;
                 found++;
                 await processTx(chain, {
                     hash: tx.hash,
