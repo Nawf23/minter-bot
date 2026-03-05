@@ -28,7 +28,7 @@ const chains: ChainConfig[] = [
         ].filter(Boolean),
         alchemyWsUrl: config.alchemyWsEth,
         wsUrl: config.wsUrl,
-        pollInterval: 60000,  // 60s — only as safety net
+        pollInterval: 15000,  // 15s — fast fallback for missed WS events
     },
     {
         name: 'BASE',
@@ -39,7 +39,7 @@ const chains: ChainConfig[] = [
         ].filter(Boolean),
         alchemyWsUrl: config.alchemyWsBase,
         wsUrl: config.wsUrlBase,
-        pollInterval: 60000,
+        pollInterval: 10000,
     },
     {
         name: 'POLY',
@@ -50,7 +50,7 @@ const chains: ChainConfig[] = [
         ].filter(Boolean),
         alchemyWsUrl: config.alchemyWsPoly,
         wsUrl: config.wsUrlPoly,
-        pollInterval: 60000,
+        pollInterval: 10000,
     }
 ];
 
@@ -465,8 +465,8 @@ function startPollingFallback(chain: ChainConfig, bot: Bot) {
             const lastBlock = lastCheckedBlock[chain.name] || currentBlock - 1;
             if (currentBlock <= lastBlock) return;
 
-            // Scan ALL blocks since last check (cap at 5 to avoid RPC abuse)
-            const MAX_BLOCKS_PER_POLL = 5;
+            // Scan ALL blocks since last check (cap at 10 to avoid RPC abuse)
+            const MAX_BLOCKS_PER_POLL = 10;
             const startBlock = Math.max(lastBlock + 1, currentBlock - MAX_BLOCKS_PER_POLL + 1);
             lastCheckedBlock[chain.name] = currentBlock;
 
