@@ -66,6 +66,7 @@ const BATCH_DELAY_MS = 200;
 
 // Alchemy connections
 const alchemyConnections: Record<string, WebSocket | null> = {};
+const alchemySubscriptionIds: Record<string, string | null> = {};
 const alchemyHealthy: Record<string, boolean> = {};  // Track WS health to skip polling
 let lastKnownDataVersion = -1;
 
@@ -270,8 +271,9 @@ async function processTx(chain: ChainConfig, tx: any, bot: Bot, source: string) 
 
 // ─── Alchemy Filtered Pending TX Subscription (hashesOnly mode) ───
 
-function startAlchemyListener(chain: ChainConfig, bot: Bot) {
-    if (!chain.alchemyWsUrl) return;
+function resubscribeAlchemy(chain: ChainConfig) {
+    const ws = alchemyConnections[chain.name];
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     const addresses = getTrackedAddresses();
     if (addresses.length === 0) {
@@ -279,16 +281,46 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
         return;
     }
 
-    console.log(`  ⚡ [${chain.name}] Starting Alchemy subscription — hashesOnly mode (${addresses.length} wallets)`);
+    // Unsubscribe from old filter if one exists
+    const oldSubId = alchemySubscriptionIds[chain.name];
+    if (oldSubId) {
+        ws.send(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'eth_unsubscribe',
+            params: [oldSubId]
+        }));
+        alchemySubscriptionIds[chain.name] = null;
+    }
 
-    // Derive HTTP URL from WS URL for fetching tx details
-    const alchemyHttpUrl = chain.alchemyWsUrl
-        .replace('wss://', 'https://')
-        .replace('ws://', 'http://');
+    const subRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_subscribe',
+        params: [
+            'alchemy_pendingTransactions',
+            {
+                fromAddress: addresses,
+                toAddress: [],
+                hashesOnly: false,
+            }
+        ]
+    };
+
+    ws.send(JSON.stringify(subRequest));
+    console.log(`[${chain.name}] 📡 Subscribed to filtered stream for ${addresses.length} tracking wallets`);
+}
+
+function startAlchemyListener(chain: ChainConfig, bot: Bot) {
+    if (!chain.alchemyWsUrl) return;
 
     const connect = () => {
         try {
             if (alchemyConnections[chain.name]) {
+                if (alchemyConnections[chain.name]!.readyState === WebSocket.OPEN) {
+                    resubscribeAlchemy(chain);
+                    return;
+                }
                 try { alchemyConnections[chain.name]!.close(); } catch { }
             }
 
@@ -298,24 +330,7 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
             ws.on('open', () => {
                 console.log(`[${chain.name}] ✅ Alchemy WebSocket connected`);
                 alchemyHealthy[chain.name] = true;
-
-                // Subscribe with hashesOnly: true (much cheaper per notification)
-                const subRequest = {
-                    jsonrpc: '2.0',
-                    id: 1,
-                    method: 'eth_subscribe',
-                    params: [
-                        'alchemy_pendingTransactions',
-                        {
-                            fromAddress: addresses,
-                            toAddress: [],
-                            hashesOnly: false,  // Reverted to false: 1) no missing tx 2) faster execution without HTTP roundtrip
-                        }
-                    ]
-                };
-
-                ws.send(JSON.stringify(subRequest));
-                console.log(`[${chain.name}] 📡 Subscribed to ${addresses.length} wallets`);
+                resubscribeAlchemy(chain);
             });
 
             ws.on('message', async (data: Buffer) => {
@@ -325,7 +340,13 @@ function startAlchemyListener(chain: ChainConfig, bot: Bot) {
                     // Subscription confirmation
                     if (msg.id === 1 && msg.result) {
                         console.log(`[${chain.name}] ✅ Subscription active: ${msg.result}`);
+                        alchemySubscriptionIds[chain.name] = msg.result;
                         return;
+                    }
+
+                    // Unsubscribe confirmation
+                    if (msg.id === 2 && msg.result) {
+                        return; // Successfully unsubscribed from old filter
                     }
 
                     // Pending tx full object notification
@@ -399,7 +420,11 @@ function startWalletChangeWatcher(bot: Bot) {
 
             for (const chain of chains) {
                 if (chain.alchemyWsUrl) {
-                    startAlchemyListener(chain, bot);
+                    if (alchemyConnections[chain.name] && alchemyConnections[chain.name]!.readyState === WebSocket.OPEN) {
+                        resubscribeAlchemy(chain);
+                    } else {
+                        startAlchemyListener(chain, bot);
+                    }
                 }
             }
         }
