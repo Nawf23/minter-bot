@@ -862,8 +862,12 @@ bot.command('broadcast', async (ctx) => {
         return;
     }
 
-    const sampleMessage =
-        `🚀 *Sample Mint Notification*\n\n` +
+    // Check for custom message
+    const args = ctx.message?.text?.split(' ').slice(1).join(' ')?.trim() || '';
+
+    const broadcastMessage = args
+        ? `📢 *Announcement*\n\n${args}`
+        : `🚀 *Sample Mint Notification*\n\n` +
         `Your wallet: \`0xYour...Wallet\`\n` +
         `Hash: [View on Explorer](https://etherscan.io/)\n\n` +
         `_If you enjoy my services, give my creator a follow on X_ 👉 [@victornawf](https://x.com/victornawf2)`;
@@ -875,7 +879,7 @@ bot.command('broadcast', async (ctx) => {
         try {
             await bot.api.sendMessage(
                 userData.chatId,
-                sampleMessage,
+                broadcastMessage,
                 { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
             );
             successCount++;
@@ -885,7 +889,8 @@ bot.command('broadcast', async (ctx) => {
         }
     }
 
-    await ctx.reply(`✅ Broadcast complete!\n\nSent: ${successCount}\nFailed: ${failCount}`);
+    const msgType = args ? 'Custom message' : 'Default message';
+    await ctx.reply(`✅ Broadcast complete!\n\n${msgType}\nSent: ${successCount}\nFailed: ${failCount}`);
 });
 
 // ─── Start Bot ───
