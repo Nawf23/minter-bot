@@ -1,4 +1,4 @@
-import { Bot, Context } from 'grammy';
+import { Bot, Context, InlineKeyboard } from 'grammy';
 import { config } from './config';
 import { store, MAX_KEYS, MAX_WALLETS } from './store';
 import { ethers } from 'ethers';
@@ -64,6 +64,223 @@ function touchUser(ctx: Context) {
     }
 }
 
+// ─── Menu Builders ───
+
+function buildMainMenu(userId: string): { text: string; keyboard: InlineKeyboard } {
+    const user = store.getUser(userId);
+    const keyCount = user?.walletKeys.length || 0;
+    const walletCount = user?.trackedWallets.length || 0;
+
+    // Detect active chains
+    const activeChains = ['ETH'];
+    if (config.rpcUrlBase) activeChains.push('BASE');
+    if (config.rpcUrlArb) activeChains.push('ARB');
+    if (config.rpcUrlOp) activeChains.push('OP');
+    if (config.rpcUrlPoly) activeChains.push('POLY');
+
+    const text =
+        `🤖 *NFT Copy Minter Bot*\n\n` +
+        `🔑 Keys: ${keyCount}/${MAX_KEYS}\n` +
+        `👀 Tracking: ${walletCount}/${MAX_WALLETS} wallets\n` +
+        `⛓ Chains: ${activeChains.join(' · ')}\n` +
+        `✅ Status: Active & Monitoring`;
+
+    const keyboard = new InlineKeyboard()
+        .text('🔑 My Keys', 'menu_keys').text('👀 Wallets', 'menu_wallets').row()
+        .text('📊 Stats', 'menu_stats').text('ℹ️ Status', 'menu_status').row()
+        .text('❓ Help', 'menu_help').text('🔄 Refresh', 'menu_refresh');
+
+    return { text, keyboard };
+}
+
+function buildKeysMenu(userId: string): { text: string; keyboard: InlineKeyboard } {
+    const keys = store.getWalletKeys(userId);
+
+    let text = `🔑 *Your Keys (${keys.length}/${MAX_KEYS})*\n\n`;
+    if (keys.length === 0) {
+        text += `📭 No keys added yet\n\n`;
+        text += `_Send /addkey <private\_key> [name] to add one_`;
+    } else {
+        keys.forEach((key, i) => {
+            const label = key.name ? ` — "${key.name}"` : '';
+            text += `${i + 1}. \`${key.address}\`${label}\n`;
+        });
+        text += `\n_Use commands to manage keys:_\n`;
+        text += `/addkey <key> [name]\n`;
+        text += `/removekey <n> · /changekey <n> <key>`;
+    }
+
+    const keyboard = new InlineKeyboard()
+        .text('← Back', 'menu_main');
+
+    return { text, keyboard };
+}
+
+function buildWalletsMenu(userId: string): { text: string; keyboard: InlineKeyboard } {
+    const wallets = store.getTrackedWallets(userId);
+
+    let text = `👀 *Tracked Wallets (${wallets.length}/${MAX_WALLETS})*\n\n`;
+    if (wallets.length === 0) {
+        text += `📭 Not tracking any wallets\n\n`;
+        text += `_Send /track <address> [name] to add one_`;
+    } else {
+        // Show first 15 wallets to avoid message limit
+        const show = wallets.slice(0, 15);
+        show.forEach((w, i) => {
+            const label = w.name ? ` — "${w.name}"` : '';
+            text += `${i + 1}. \`${w.address.substring(0, 10)}...${w.address.substring(38)}\`${label}\n`;
+        });
+        if (wallets.length > 15) {
+            text += `\n_...and ${wallets.length - 15} more. Use /mywallets to see all._\n`;
+        }
+        text += `\n_Commands:_\n`;
+        text += `/track <address> [name]\n`;
+        text += `/remove <address>`;
+    }
+
+    const keyboard = new InlineKeyboard()
+        .text('← Back', 'menu_main');
+
+    return { text, keyboard };
+}
+
+function buildStatsMenu(userId: string): { text: string; keyboard: InlineKeyboard } {
+    const { keys, totals } = store.getStats(userId);
+    const successRate = totals.mintsAttempted > 0
+        ? Math.round((totals.mintsSucceeded / totals.mintsAttempted) * 100)
+        : 0;
+
+    let text = `📊 *Mint Statistics*\n\n`;
+    text += `Attempted: ${totals.mintsAttempted}\n`;
+    text += `✅ Succeeded: ${totals.mintsSucceeded}\n`;
+    text += `❌ Failed: ${totals.mintsFailed}\n`;
+    text += `📈 Success Rate: ${successRate}%\n`;
+
+    if (totals.lastMintAt) {
+        const d = new Date(totals.lastMintAt);
+        text += `🕐 Last: ${d.toLocaleDateString()} ${d.toLocaleTimeString()}\n`;
+    }
+
+    if (keys.length > 1) {
+        text += `\n*Per Key:*\n`;
+        for (const k of keys) {
+            const label = k.name ? `"${k.name}"` : k.address.substring(0, 10) + '...';
+            const rate = k.stats.mintsAttempted > 0
+                ? Math.round((k.stats.mintsSucceeded / k.stats.mintsAttempted) * 100)
+                : 0;
+            text += `  ${label}: ${k.stats.mintsSucceeded}✅ / ${k.stats.mintsFailed}❌ (${rate}%)\n`;
+        }
+    }
+
+    const keyboard = new InlineKeyboard()
+        .text('🔄 Refresh', 'menu_stats').text('← Back', 'menu_main');
+
+    return { text, keyboard };
+}
+
+function buildStatusMenu(userId: string): { text: string; keyboard: InlineKeyboard } {
+    const keys = store.getWalletKeys(userId);
+    const wallets = store.getTrackedWallets(userId);
+
+    const activeChains = ['ETH'];
+    if (config.rpcUrlBase) activeChains.push('BASE');
+    if (config.rpcUrlArb) activeChains.push('ARB');
+    if (config.rpcUrlOp) activeChains.push('OP');
+    if (config.rpcUrlPoly) activeChains.push('POLY');
+
+    let keyList = '';
+    keys.forEach((key, i) => {
+        const label = key.name ? ` "${key.name}"` : '';
+        keyList += `  ${i + 1}. \`${key.address}\`${label}\n`;
+    });
+
+    const text =
+        `ℹ️ *Bot Status*\n\n` +
+        `*Keys (${keys.length}/${MAX_KEYS}):*\n${keyList}\n` +
+        `Tracking: ${wallets.length}/${MAX_WALLETS} wallets\n` +
+        `Chains: ${activeChains.join(' + ')}\n` +
+        `Mode: Free mints only\n\n` +
+        `✅ Active and monitoring!`;
+
+    const keyboard = new InlineKeyboard()
+        .text('🔄 Refresh', 'menu_status').text('← Back', 'menu_main');
+
+    return { text, keyboard };
+}
+
+function buildHelpMenu(): { text: string; keyboard: InlineKeyboard } {
+    const text =
+        `❓ *Commands*\n\n` +
+        `*Keys (up to ${MAX_KEYS}):*\n` +
+        `/addkey <key> [name]\n` +
+        `/removekey <n> · /changekey <n> <key>\n` +
+        `/mykeys\n\n` +
+        `*Tracking (up to ${MAX_WALLETS}):*\n` +
+        `/track <address> [name]\n` +
+        `/remove <address> · /mywallets\n\n` +
+        `*Info:*\n` +
+        `/status · /stats · /myid\n\n` +
+        `⚠️ *ALWAYS USE BURNER WALLETS!*`;
+
+    const keyboard = new InlineKeyboard()
+        .text('← Back', 'menu_main');
+
+    return { text, keyboard };
+}
+
+// ─── Callback Query Handler ───
+
+bot.on('callback_query:data', async (ctx) => {
+    const userId = getUserId(ctx);
+    const data = ctx.callbackQuery.data;
+
+    if (!store.userExists(userId)) {
+        await ctx.answerCallbackQuery({ text: '❌ Use /addkey first' });
+        return;
+    }
+
+    let menu: { text: string; keyboard: InlineKeyboard };
+
+    switch (data) {
+        case 'menu_main':
+        case 'menu_refresh':
+            menu = buildMainMenu(userId);
+            break;
+        case 'menu_keys':
+            menu = buildKeysMenu(userId);
+            break;
+        case 'menu_wallets':
+            menu = buildWalletsMenu(userId);
+            break;
+        case 'menu_stats':
+            menu = buildStatsMenu(userId);
+            break;
+        case 'menu_status':
+            menu = buildStatusMenu(userId);
+            break;
+        case 'menu_help':
+            menu = buildHelpMenu();
+            break;
+        default:
+            await ctx.answerCallbackQuery();
+            return;
+    }
+
+    try {
+        await ctx.editMessageText(menu.text, {
+            parse_mode: 'Markdown',
+            reply_markup: menu.keyboard,
+        });
+    } catch (err: any) {
+        // Telegram throws if message content hasn't changed (e.g. Refresh pressed too fast)
+        if (!err.message?.includes('message is not modified')) {
+            console.error(`Menu error: ${err.message}`);
+        }
+    }
+
+    await ctx.answerCallbackQuery();
+});
+
 // Helper to check if migration is needed and perform it
 function performMigrationIfNeeded(ctx: Context) {
     const userId = getUserId(ctx);
@@ -104,32 +321,21 @@ bot.command('start', async (ctx) => {
 
     if (!user) {
         await ctx.reply(
-            `🤖 **Welcome to NFT Copy Minter Bot!**\n\n` +
-            `⚠️ **USE BURNER WALLETS ONLY!** ⚠️\n\n` +
-            `This bot will auto-mint NFTs when wallets you track make mints.\n\n` +
-            `**Setup:**\n` +
-            `1. Create fresh burner wallet(s)\n` +
-            `2. Add funds for gas (small amount)\n` +
-            `3. Use /addkey to add your key(s)\n` +
-            `4. Use /track to add wallets to watch\n\n` +
-            `**Key Commands:**\n` +
-            `/addkey <key> [name] - Add a burner key (up to ${MAX_KEYS})\n` +
-            `/mykeys - View your keys\n` +
-            `/track <address> [name] - Track a wallet (up to ${MAX_WALLETS})\n` +
-            `/status - Check bot status\n` +
-            `/help - Show all commands`,
+            `🤖 *Welcome to NFT Copy Minter Bot!*\n\n` +
+            `⚠️ *USE BURNER WALLETS ONLY!* ⚠️\n\n` +
+            `This bot auto-mints NFTs when wallets you track make mints.\n\n` +
+            `*Quick Setup:*\n` +
+            `1️⃣ /addkey <private\_key> [name]\n` +
+            `2️⃣ /track <wallet\_address> [name]\n` +
+            `3️⃣ Done! Bot will auto-copy free mints.`,
             { parse_mode: 'Markdown' }
         );
     } else {
-        const walletCount = user.trackedWallets.length;
-        const keyCount = user.walletKeys.length;
-        await ctx.reply(
-            `✅ **Bot Active**\n\n` +
-            `Keys: ${keyCount}/${MAX_KEYS}\n` +
-            `Tracking: ${walletCount}/${MAX_WALLETS} wallets\n\n` +
-            `Use /mykeys to view keys or /help for commands.`,
-            { parse_mode: 'Markdown' }
-        );
+        const menu = buildMainMenu(userId);
+        await ctx.reply(menu.text, {
+            parse_mode: 'Markdown',
+            reply_markup: menu.keyboard,
+        });
     }
 });
 
