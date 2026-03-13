@@ -42,6 +42,7 @@ interface MultiMintOptions {
     rpcUrl: string;
     userLabel: string;
     userId: string;
+    contractAddress?: string;  // For collection tracking
 }
 
 // ─── Explorer URLs per chain ───
@@ -281,9 +282,45 @@ export async function attemptMintAllKeys({
         return keys.map(k => ({ success: false, keyName: k.name, address: k.address, error: `Paid (${cost} ETH)` }));
     }
 
-    // 1. Fire all keys in parallel IMMEDIATELY (Highest Priority)
+    // ─── Duplicate Collection Check ───
+    const contractAddr = originalTx.to;
+    store.cleanExpiredMints(userId);
+
+    // Filter out keys that already minted this collection
+    const eligibleKeys: typeof keys = [];
+    const skippedResults: MintResult[] = [];
+
+    for (const key of keys) {
+        if (store.hasAlreadyMinted(userId, contractAddr, key.address)) {
+            console.log(`[${chainName}]   ⏭️ [${key.name}] Already minted ${contractAddr.substring(0, 10)}... — skipping`);
+            skippedResults.push({
+                success: false,
+                keyName: key.name,
+                address: key.address,
+                error: 'Already minted this collection',
+                skippedPrecheck: true,
+            });
+        } else {
+            eligibleKeys.push(key);
+        }
+    }
+
+    // If ALL keys already minted this collection, skip entirely
+    if (eligibleKeys.length === 0) {
+        console.log(`[${chainName}] ⏭️ [${userLabel}] All keys already minted ${contractAddr.substring(0, 10)}...`);
+        bot.api.sendMessage(chatId,
+            `⏭️ *Mint Skipped* (${chainName})\n\n` +
+            `Target: \`${contractAddr}\`\n` +
+            `Reason: All keys already minted this collection\n\n` +
+            `_Duplicate mint prevention saved gas! Resets in 24h._`,
+            { parse_mode: "Markdown" }
+        ).catch(() => { });
+        return skippedResults;
+    }
+
+    // 1. Fire eligible keys in parallel IMMEDIATELY (Highest Priority)
     const mintPromise = Promise.allSettled(
-        keys.map(async (key) => {
+        eligibleKeys.map(async (key) => {
             const provider = getSharedProvider(rpcUrl);
             const signer = new ethers.Wallet(key.privateKey, provider);
             return attemptSingleMint({
@@ -299,11 +336,12 @@ export async function attemptMintAllKeys({
     );
 
     // 2. Notify: mint detected (Asynchronously, don't await)
+    const skippedNote = skippedResults.length > 0 ? `\n⏭️ ${skippedResults.length} key(s) skipped (already minted)` : '';
     bot.api.sendMessage(chatId,
         `🚨 *Mint detected on ${chainName}!*\n\n` +
         `Target: \`${originalTx.to}\`\n` +
         `From: \`${originalTx.from}\`\n` +
-        `FREE mint! 🤑 Firing ${keys.length} key(s)...`,
+        `FREE mint! 🤑 Firing ${eligibleKeys.length} key(s)...${skippedNote}`,
         { parse_mode: "Markdown" }
     ).catch(() => { });
 
@@ -313,16 +351,19 @@ export async function attemptMintAllKeys({
     const mintResults: MintResult[] = results.map((r, i) =>
         r.status === 'fulfilled' ? r.value : {
             success: false,
-            keyName: keys[i]?.name || null,
-            address: keys[i]?.address || '???',
+            keyName: eligibleKeys[i]?.name || null,
+            address: eligibleKeys[i]?.address || '???',
             error: r.status === 'rejected' ? r.reason?.message : 'Unknown error',
         }
     );
 
+    // Combine with skipped results
+    const allResults = [...skippedResults, ...mintResults];
+
     // Build bundled notification
-    const successes = mintResults.filter(r => r.success);
-    const failures = mintResults.filter(r => !r.success);
-    const prechecked = mintResults.filter(r => r.skippedPrecheck);
+    const successes = allResults.filter(r => r.success);
+    const failures = allResults.filter(r => !r.success);
+    const prechecked = allResults.filter(r => r.skippedPrecheck);
 
     let msg = '';
 
@@ -368,11 +409,11 @@ export async function attemptMintAllKeys({
     // 5. Asynchronously wait for confirmations and notify (don't block the loop)
     successes.forEach(res => {
         if (res.txHash) {
-            waitForConfirmation(res.txHash, res.keyName, res.address, chainName, bot, chatId, rpcUrl);
+            waitForConfirmation(res.txHash, res.keyName, res.address, chainName, bot, chatId, rpcUrl, userId, contractAddr);
         }
     });
 
-    return mintResults;
+    return allResults;
 }
 
 /**
@@ -385,7 +426,9 @@ async function waitForConfirmation(
     chainName: string,
     bot: Bot,
     chatId: number,
-    rpcUrl: string
+    rpcUrl: string,
+    userId?: string,
+    contractAddress?: string
 ) {
     try {
         const provider = getSharedProvider(rpcUrl);
@@ -408,6 +451,12 @@ async function waitForConfirmation(
                 `_Gas used: ${gasUsed} | Price: ${gasPrice} gwei_`,
                 { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
             ).catch(() => { });
+
+            // Record this collection as minted for duplicate prevention
+            if (userId && contractAddress) {
+                store.recordMintedCollection(userId, contractAddress, address);
+                console.log(`[${chainName}]   📝 [${label}] Recorded mint for ${contractAddress.substring(0, 10)}...`);
+            }
         } else {
             const label = keyName ? `"${keyName}"` : 'Key';
             console.log(`[${chainName}]   ❌ [${label}] Reverted on-chain: ${hash}`);

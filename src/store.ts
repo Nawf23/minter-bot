@@ -41,12 +41,22 @@ export interface UserStats {
     [keyAddress: string]: KeyStats;
 }
 
+export interface MintedCollectionEntry {
+    mintedAt: string;        // ISO timestamp
+    keyAddresses: string[];  // Which bot keys already minted this contract
+}
+
+export interface MintedCollections {
+    [contractAddress: string]: MintedCollectionEntry;
+}
+
 export interface UserData {
     walletKeys: WalletKey[];        // Up to MAX_KEYS
     trackedWallets: TrackedWallet[];  // Up to MAX_WALLETS
     chatId: number;
     username: string | null;         // Telegram @username
     stats: UserStats;                // Per-key stats
+    mintedCollections?: MintedCollections;  // Track which collections each key has minted
 }
 
 export interface BotData {
@@ -433,6 +443,101 @@ class Store {
 
     getTrackedWallets(userId: string): TrackedWallet[] {
         return this.data.users[userId]?.trackedWallets || [];
+    }
+
+    // ─── Collection Mint Tracking ───
+
+    private static readonly MINT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+    /**
+     * Record that a key successfully minted from a contract.
+     */
+    recordMintedCollection(userId: string, contractAddress: string, keyAddress: string) {
+        const user = this.data.users[userId];
+        if (!user) return;
+
+        if (!user.mintedCollections) user.mintedCollections = {};
+        const contract = contractAddress.toLowerCase();
+
+        if (!user.mintedCollections[contract]) {
+            user.mintedCollections[contract] = {
+                mintedAt: new Date().toISOString(),
+                keyAddresses: [keyAddress.toLowerCase()],
+            };
+        } else {
+            const entry = user.mintedCollections[contract];
+            const addr = keyAddress.toLowerCase();
+            if (!entry.keyAddresses.includes(addr)) {
+                entry.keyAddresses.push(addr);
+            }
+            entry.mintedAt = new Date().toISOString();
+        }
+
+        this.save(false);
+    }
+
+    /**
+     * Check if a specific key has already minted from a contract.
+     */
+    hasAlreadyMinted(userId: string, contractAddress: string, keyAddress: string): boolean {
+        const user = this.data.users[userId];
+        if (!user || !user.mintedCollections) return false;
+
+        const contract = contractAddress.toLowerCase();
+        const entry = user.mintedCollections[contract];
+        if (!entry) return false;
+
+        // Check if expired (24h)
+        const mintedAt = new Date(entry.mintedAt).getTime();
+        if (Date.now() - mintedAt > Store.MINT_EXPIRY_MS) {
+            delete user.mintedCollections[contract];
+            return false;
+        }
+
+        return entry.keyAddresses.includes(keyAddress.toLowerCase());
+    }
+
+    /**
+     * Check if ALL keys for a user have already minted from a contract.
+     */
+    haveAllKeysMinted(userId: string, contractAddress: string): boolean {
+        const user = this.data.users[userId];
+        if (!user || !user.mintedCollections) return false;
+
+        const contract = contractAddress.toLowerCase();
+        const entry = user.mintedCollections[contract];
+        if (!entry) return false;
+
+        // Check expiry
+        const mintedAt = new Date(entry.mintedAt).getTime();
+        if (Date.now() - mintedAt > Store.MINT_EXPIRY_MS) {
+            delete user.mintedCollections[contract];
+            return false;
+        }
+
+        // Check if every key address has minted
+        return user.walletKeys.every(k =>
+            entry.keyAddresses.includes(k.address.toLowerCase())
+        );
+    }
+
+    /**
+     * Clean up expired mint records for a user.
+     */
+    cleanExpiredMints(userId: string) {
+        const user = this.data.users[userId];
+        if (!user || !user.mintedCollections) return;
+
+        const now = Date.now();
+        let cleaned = 0;
+        for (const [contract, entry] of Object.entries(user.mintedCollections)) {
+            const mintedAt = new Date(entry.mintedAt).getTime();
+            if (now - mintedAt > Store.MINT_EXPIRY_MS) {
+                delete user.mintedCollections[contract];
+                cleaned++;
+            }
+        }
+        if (cleaned > 0) this.save(false);
     }
 
     // ─── Legacy Migration ───
